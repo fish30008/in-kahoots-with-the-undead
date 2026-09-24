@@ -1,0 +1,165 @@
+services:
+  player-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PLAYER_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${PLAYER_POSTGRES_PASSWORD:-qwerty}
+      POSTGRES_DB: ${PLAYER_POSTGRES_DB:-player}
+    volumes:
+      - player-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PLAYER_POSTGRES_USER:-postgres} -d ${PLAYER_POSTGRES_DB:-player}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  player:
+    # No Dockerfile in services/player_service yet, so this is image-only:
+    # build and push the image from that repo, or run the service on the host.
+    image: ${DOCKERHUB_USERNAME:-fish30008}/player-service:${PLAYER_SERVICE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      PORT: ${PLAYER_PORT:-8081}
+      DATABASE_URL: postgres://${PLAYER_POSTGRES_USER:-postgres}:${PLAYER_POSTGRES_PASSWORD:-qwerty}@player-db:5432/${PLAYER_POSTGRES_DB:-player}?sslmode=disable
+      # Same value as every other service: GET /auth/jwks is an internal
+      # endpoint, so game cannot verify a single cookie without it matching.
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:-supersecret}
+      JWT_KID: ${JWT_KID:-2026-09}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    ports:
+      - "${PLAYER_PORT:-8081}:${PLAYER_PORT:-8081}"
+    depends_on:
+      player-db:
+        condition: service_healthy
+
+  game-db:
+    # 17-alpine, matching services/game_service/compose.yaml.
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${GAME_POSTGRES_USER:-game}
+      POSTGRES_PASSWORD: ${GAME_POSTGRES_PASSWORD:-qwerty}
+      POSTGRES_DB: ${GAME_POSTGRES_DB:-game_service}
+    ports:
+      # Exposed for psql and for the store contract tests (TEST_DATABASE_URL).
+      # Drop this mapping to keep the database reachable only inside the network.
+      - "${GAME_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - game-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${GAME_POSTGRES_USER:-game} -d ${GAME_POSTGRES_DB:-game_service}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  game:
+    # Built from the submodule when the image is not present locally; the tag
+    # is kept so `docker compose push` publishes it under the same name.
+    build:
+      context: ./services/game_service
+      dockerfile: Dockerfile
+    image: ${DOCKERHUB_USERNAME:-fish30008}/game-service:${GAME_SERVICE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      PORT: ${GAME_PORT:-8082}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Empty would fall back to the in-memory store, losing every lobby on exit.
+      DATABASE_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      # Player is in this stack, so it is reached by service name, not
+      # host.docker.internal as in the standalone game_service compose file.
+      PLAYER_SERVICE_URL: ${PLAYER_SERVICE_URL:-http://player:${PLAYER_PORT:-8081}}
+      # Empty means "use the mock" for each service not wired up yet.
+      # BASE_SERVICE_URL=http://base:8087 once base speaks game's contract.
+      WORLD_SERVICE_URL: ${WORLD_SERVICE_URL:-}
+      ZOMBIE_SERVICE_URL: ${ZOMBIE_SERVICE_URL:-}
+      EXAM_SERVICE_URL: ${EXAM_SERVICE_URL:-}
+      RESOURCE_SERVICE_URL: ${RESOURCE_SERVICE_URL:-}
+      BASE_SERVICE_URL: ${BASE_SERVICE_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      JWKS_CACHE_SECONDS: ${JWKS_CACHE_SECONDS:-3600}
+      DAY_PHASE_SECONDS: ${DAY_PHASE_SECONDS:-600}
+      NIGHT_PHASE_SECONDS: ${NIGHT_PHASE_SECONDS:-300}
+      TICK_INTERVAL_MS: ${TICK_INTERVAL_MS:-1000}
+    ports:
+      - "${GAME_PORT:-8082}:${GAME_PORT:-8082}"
+    depends_on:
+      game-db:
+        condition: service_healthy
+    healthcheck:
+      # Readiness, not liveness: unhealthy here means the database is unreachable.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${GAME_PORT:-8082}/ready"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  base-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${BASE_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${BASE_POSTGRES_PASSWORD:?set BASE_POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${BASE_POSTGRES_DB:-base}
+    volumes:
+      - base-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BASE_POSTGRES_USER:-postgres} -d ${BASE_POSTGRES_DB:-base}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  base:
+    image: ${BASE_DOCKERHUB_USERNAME:-mixam052}/kahoots-base-service:${BASE_SERVICE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      PORT: ${BASE_PORT:-8087}
+      DATABASE_URL: postgres://${BASE_POSTGRES_USER:-postgres}:${BASE_POSTGRES_PASSWORD}@base-db:5432/${BASE_POSTGRES_DB:-base}?sslmode=disable
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      PLAYER_URL: http://player:${PLAYER_PORT:-8081}
+      GAME_URL: http://game:${GAME_PORT:-8082}
+      RESOURCE_URL: http://resource:8086
+      WORLD_URL: http://world:8084
+    ports:
+      - "${BASE_PORT:-8087}:${BASE_PORT:-8087}"
+    depends_on:
+      base-db:
+        condition: service_healthy
+
+  crafting-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CRAFTING_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${CRAFTING_POSTGRES_PASSWORD:?set CRAFTING_POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${CRAFTING_POSTGRES_DB:-crafting}
+    volumes:
+      - crafting-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CRAFTING_POSTGRES_USER:-postgres} -d ${CRAFTING_POSTGRES_DB:-crafting}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  crafting:
+    image: ${CRAFTING_DOCKERHUB_USERNAME:-mixam052}/kahoots-crafting-service:${CRAFTING_SERVICE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      PORT: ${CRAFTING_PORT:-8088}
+      DATABASE_URL: postgres://${CRAFTING_POSTGRES_USER:-postgres}:${CRAFTING_POSTGRES_PASSWORD}@crafting-db:5432/${CRAFTING_POSTGRES_DB:-crafting}?sslmode=disable
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      PLAYER_URL: http://player:${PLAYER_PORT:-8081}
+      RESOURCE_URL: http://resource:8086
+    ports:
+      - "${CRAFTING_PORT:-8088}:${CRAFTING_PORT:-8088}"
+    depends_on:
+      crafting-db:
+        condition: service_healthy
+
+volumes:
+  player-db-data:
+  game-db-data:
+  base-db-data:
+  crafting-db-data:
