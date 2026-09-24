@@ -1,3 +1,6 @@
 [submodule "services/player_service"]
 	path = services/player_service
 	url = https://github.com/fish30008/player_service.git
+[submodule "services/game_service"]
+	path = services/game_service
+	url = https://github.com/fish30008/game_service.git
