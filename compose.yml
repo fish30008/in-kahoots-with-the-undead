@@ -17,7 +17,7 @@ services:
   player:
     # No Dockerfile in services/player_service yet, so this is image-only:
     # build and push the image from that repo, or run the service on the host.
-    image: ${DOCKERHUB_USERNAME:-fish30008}/player-service:${PLAYER_SERVICE_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-0.2}
     restart: unless-stopped
     environment:
       PORT: ${PLAYER_PORT:-8081}
@@ -60,7 +60,7 @@ services:
     build:
       context: ./services/game_service
       dockerfile: Dockerfile
-    image: ${DOCKERHUB_USERNAME:-fish30008}/game-service:${GAME_SERVICE_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-0.1}
     restart: unless-stopped
     environment:
       PORT: ${GAME_PORT:-8082}
@@ -71,8 +71,10 @@ services:
       # Player is in this stack, so it is reached by service name, not
       # host.docker.internal as in the standalone game_service compose file.
       PLAYER_SERVICE_URL: ${PLAYER_SERVICE_URL:-http://player:${PLAYER_PORT:-8081}}
-      # Empty means "use the mock" for each service not wired up yet.
-      # BASE_SERVICE_URL=http://base:8087 once base speaks game's contract.
+      # Empty means "use the mock". Every service below is in this stack, so
+      # set the URL in .env to use the real one: http://world:8084,
+      # http://zombie:8085, http://exam:8083, http://resource:8086,
+      # http://base:8087.
       WORLD_SERVICE_URL: ${WORLD_SERVICE_URL:-}
       ZOMBIE_SERVICE_URL: ${ZOMBIE_SERVICE_URL:-}
       EXAM_SERVICE_URL: ${EXAM_SERVICE_URL:-}
@@ -101,7 +103,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${BASE_POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${BASE_POSTGRES_PASSWORD:?set BASE_POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${BASE_POSTGRES_PASSWORD:-qwerty}
       POSTGRES_DB: ${BASE_POSTGRES_DB:-base}
     volumes:
       - base-db-data:/var/lib/postgresql/data
@@ -116,10 +118,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: ${BASE_PORT:-8087}
-      DATABASE_URL: postgres://${BASE_POSTGRES_USER:-postgres}:${BASE_POSTGRES_PASSWORD}@base-db:5432/${BASE_POSTGRES_DB:-base}?sslmode=disable
+      DATABASE_URL: postgres://${BASE_POSTGRES_USER:-postgres}:${BASE_POSTGRES_PASSWORD:-qwerty}@base-db:5432/${BASE_POSTGRES_DB:-base}?sslmode=disable
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       PLAYER_URL: http://player:${PLAYER_PORT:-8081}
-      GAME_URL: http://game:${GAME_PORT:-8082}
       RESOURCE_URL: http://resource:8086
       WORLD_URL: http://world:8084
     ports:
@@ -133,7 +134,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${CRAFTING_POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${CRAFTING_POSTGRES_PASSWORD:?set CRAFTING_POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${CRAFTING_POSTGRES_PASSWORD:-qwerty}
       POSTGRES_DB: ${CRAFTING_POSTGRES_DB:-crafting}
     volumes:
       - crafting-db-data:/var/lib/postgresql/data
@@ -148,7 +149,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: ${CRAFTING_PORT:-8088}
-      DATABASE_URL: postgres://${CRAFTING_POSTGRES_USER:-postgres}:${CRAFTING_POSTGRES_PASSWORD}@crafting-db:5432/${CRAFTING_POSTGRES_DB:-crafting}?sslmode=disable
+      DATABASE_URL: postgres://${CRAFTING_POSTGRES_USER:-postgres}:${CRAFTING_POSTGRES_PASSWORD:-qwerty}@crafting-db:5432/${CRAFTING_POSTGRES_DB:-crafting}?sslmode=disable
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       PLAYER_URL: http://player:${PLAYER_PORT:-8081}
       RESOURCE_URL: http://resource:8086
@@ -158,8 +159,150 @@ services:
       crafting-db:
         condition: service_healthy
 
+  exam-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${EXAM_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${EXAM_POSTGRES_PASSWORD:-qwerty}
+      POSTGRES_DB: ${EXAM_POSTGRES_DB:-exam}
+    volumes:
+      - exam-db-data:/var/lib/postgresql/data
+      - ./db/exam-service/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EXAM_POSTGRES_USER:-postgres} -d ${EXAM_POSTGRES_DB:-exam}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  exam:
+    image: ${EXAM_DOCKERHUB_USERNAME:-inercaso}/exam-service:${EXAM_SERVICE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      PORT: ${EXAM_PORT:-8083}
+      DATABASE_URL: postgres://${EXAM_POSTGRES_USER:-postgres}:${EXAM_POSTGRES_PASSWORD:-qwerty}@exam-db:5432/${EXAM_POSTGRES_DB:-exam}?sslmode=disable
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      AUTH_MODE: ${EXAM_AUTH_MODE:-mock}
+      PLAYER_URL: http://player:${PLAYER_PORT:-8081}
+      PLAYER_CLIENT: ${EXAM_PLAYER_CLIENT:-mock}
+      ZOMBIE_URL: http://zombie:8085
+      ZOMBIE_CLIENT: ${EXAM_ZOMBIE_CLIENT:-mock}
+    ports:
+      - "${EXAM_PORT:-8083}:${EXAM_PORT:-8083}"
+    depends_on:
+      exam-db:
+        condition: service_healthy
+
+  world-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${WORLD_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${WORLD_POSTGRES_PASSWORD:-qwerty}
+      POSTGRES_DB: ${WORLD_POSTGRES_DB:-world}
+    volumes:
+      - world-db-data:/var/lib/postgresql/data
+      - ./db/world-service/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WORLD_POSTGRES_USER:-postgres} -d ${WORLD_POSTGRES_DB:-world}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  world:
+    image: ${WORLD_DOCKERHUB_USERNAME:-inercaso}/world-service:${WORLD_SERVICE_TAG:-0.1.0}
+    restart: unless-stopped
+    environment:
+      PORT: ${WORLD_PORT:-8084}
+      DATABASE_URL: postgres://${WORLD_POSTGRES_USER:-postgres}:${WORLD_POSTGRES_PASSWORD:-qwerty}@world-db:5432/${WORLD_POSTGRES_DB:-world}?sslmode=disable
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      AUTH_MODE: ${WORLD_AUTH_MODE:-mock}
+      PLAYER_URL: http://player:${PLAYER_PORT:-8081}
+      EXAM_EVENTS_URL: ws://exam:${EXAM_PORT:-8083}/events
+    ports:
+      - "${WORLD_PORT:-8084}:${WORLD_PORT:-8084}"
+    depends_on:
+      world-db:
+        condition: service_healthy
+
+  zombie-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${ZOMBIE_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${ZOMBIE_POSTGRES_PASSWORD:-qwerty}
+      POSTGRES_DB: ${ZOMBIE_POSTGRES_DB:-zombie}
+    volumes:
+      - zombie-db-data:/var/lib/postgresql/data
+      - ./db/zombie-service/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ZOMBIE_POSTGRES_USER:-postgres} -d ${ZOMBIE_POSTGRES_DB:-zombie}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  zombie:
+    image: ${ZOMBIE_DOCKERHUB_USERNAME:-nevaletik}/kahoot-zombie-service:${ZOMBIE_SERVICE_TAG:-1.1.0}
+    restart: unless-stopped
+    environment:
+      PORT: ${ZOMBIE_PORT:-8085}
+      INTERNAL_API_KEY: ${INTERNAL_KEY:-changeme}
+      DB_HOST: zombie-db
+      DB_PORT: 5432
+      DB_USERNAME: ${ZOMBIE_POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${ZOMBIE_POSTGRES_PASSWORD:-qwerty}
+      DB_NAME: ${ZOMBIE_POSTGRES_DB:-zombie}
+    ports:
+      - "${ZOMBIE_PORT:-8085}:${ZOMBIE_PORT:-8085}"
+    depends_on:
+      zombie-db:
+        condition: service_healthy
+
+  resource-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${RESOURCE_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${RESOURCE_POSTGRES_PASSWORD:-qwerty}
+      POSTGRES_DB: ${RESOURCE_POSTGRES_DB:-resource}
+    volumes:
+      - resource-db-data:/var/lib/postgresql/data
+      - ./db/resource-service/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RESOURCE_POSTGRES_USER:-postgres} -d ${RESOURCE_POSTGRES_DB:-resource}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  resource:
+    image: ${RESOURCE_DOCKERHUB_USERNAME:-nevaletik}/kahoot-resource-service:${RESOURCE_SERVICE_TAG:-1.1.0}
+    restart: unless-stopped
+    environment:
+      PORT: ${RESOURCE_PORT:-8086}
+      INTERNAL_API_KEY: ${INTERNAL_KEY:-changeme}
+      DB_HOST: resource-db
+      DB_PORT: 5432
+      DB_USERNAME: ${RESOURCE_POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${RESOURCE_POSTGRES_PASSWORD:-qwerty}
+      DB_NAME: ${RESOURCE_POSTGRES_DB:-resource}
+      # empty = built-in World mock; http://world:8084 to use the real World Service
+      WORLD_SERVICE_URL: ${RESOURCE_WORLD_SERVICE_URL:-}
+      # empty = not connected (use POST /resources/internal/events);
+      # ws://player:8081/events and ws://game:8082/events once they serve /events
+      PLAYER_EVENTS_URL: ${RESOURCE_PLAYER_EVENTS_URL:-}
+      GAME_EVENTS_URL: ${RESOURCE_GAME_EVENTS_URL:-}
+    ports:
+      - "${RESOURCE_PORT:-8086}:${RESOURCE_PORT:-8086}"
+    depends_on:
+      resource-db:
+        condition: service_healthy
+
 volumes:
   player-db-data:
   game-db-data:
   base-db-data:
   crafting-db-data:
+  exam-db-data:
+  world-db-data:
+  zombie-db-data:
+  resource-db-data:

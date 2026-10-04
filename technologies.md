@@ -1,44 +1,128 @@
 # Technologies & Stack Choices
 
-These are proposed implementation choices for the planned services. They describe the target architecture, not completed code in the current workspace.
+## 1. Stack
 
-## 1. Language Split
+One language, one database, no extra infrastructure.
 
-To meet the multi-language requirement, the project is divided between two languages:
-
-| Language | Framework & DB | Role | Services |
-|---|---|---|---|
-| **Go** | Gin + PostgreSQL | Transactional CRUD, data integrity | Player, Exam, World, Zombie, Base, Crafting |
-| **TypeScript** | Node.js + Express (or NestJS) + PostgreSQL | Real-time events, WebSockets | Game, Resource |
-
----
-
-## 2. Per-Service Technical Breakdown
-
-| Service | Language | Stack | Communication | Justification |
-|---|---|---|---|---|
-| **Player** | **Go** | Gin, GORM, PostgreSQL | REST | Strong consistency and simple database transactions for atomic item trading. |
-| **Game** | **TypeScript** | Express / Socket.IO, PostgreSQL | WebSockets + REST | A non-blocking event loop suits WebSocket connections and action timers. |
-| **Exam** | **Go** | Gin, PostgreSQL | REST | Simple question retrieval and exam grading. |
-| **World** | **Go** | Gin, PostgreSQL | REST | Relational queries for campus rooms and spawn locations. |
-| **Zombie** | **Go** | Gin, PostgreSQL | REST | Static configuration store for zombie stats and types. |
-| **Resource** | **TypeScript** | Express, PostgreSQL | REST | Validates gathering actions and tracks resource balances. |
-| **Base** | **Go** | Gin, PostgreSQL | REST | Tracks room barricades and base upgrade levels. |
-| **Crafting** | **Go** | Gin, PostgreSQL | REST | Recipe evaluation and crafting logic. |
-
----
-
-## 3. Trade-offs
-
-- **Go:** Fast, low memory usage, and great for atomic database operations (trading), but requires more boilerplate.
-- **TypeScript:** Extremely fast to set up for WebSockets and async timers, but dynamic typing requires careful validation.
-
-## 4. Implementation status
-
-| Area | Current repository state |
+| Layer | Choice |
 |---|---|
-| Documentation | Present: architecture and technology notes. |
-| Player Service | Directory exists at `services/player_service/`; no source or configuration files are present yet. |
-| Other services | Described as planned services; no implementation directories are present in the current workspace snapshot. |
+| Language | Go |
+| HTTP framework | Gin (`gin-gonic/gin`) |
+| Database | PostgreSQL (one database per service) |
+| Transport | HTTP with JSON bodies, used both synchronously and asynchronously |
+| Concurrency | Goroutines (standard library) |
+| Packaging | Docker, orchestrated with Docker Compose |
 
-The word “implemented” should only be added after a service has source code, configuration, and a documented way to run or test it.
+There is no message broker, no cache and no authentication layer. Asynchronous
+delivery is done with goroutines over the same HTTP endpoints, so the only
+runtime dependencies are the service binaries and PostgreSQL.
+
+## 2. Services
+
+| Service | Port | Owns |
+|---|---|---|
+| **Player** | 8081 | Players and their inventory |
+| **Game** | 8082 | Game sessions and the players joined to them |
+
+Each service is a separate Go module with its own PostgreSQL database. A service
+never reads another service's database; it asks over HTTP instead.
+
+## 3. Communication model
+
+Service-to-service calls come in two shapes, chosen by one question: **does the
+caller need the answer before it can continue?**
+
+### Synchronous — the caller needs the answer
+
+A blocking HTTP request with a timeout. The caller cannot proceed without the
+response, so it waits for it and propagates the failure if the call fails.
+
+```go
+// Game must know the player exists before joining them to a session.
+ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+defer cancel()
+
+p, err := playerClient.GetPlayer(ctx, playerID)
+if err != nil {
+    c.JSON(http.StatusBadGateway, gin.H{"error": "player service unavailable"})
+    return
+}
+```
+
+### Asynchronous — nobody is waiting
+
+The handler responds immediately and a goroutine performs the call in the
+background. The goroutine gets its own `context.Background()` timeout, because
+the request context is cancelled the moment the handler returns.
+
+```go
+// A player came online; Player is told, but Game does not wait for it.
+go func() {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    if err := playerClient.SetPresence(ctx, playerID, true, eventID); err != nil {
+        log.Error("presence notify failed", "player", playerID, "err", err)
+    }
+}()
+
+c.JSON(http.StatusCreated, session)
+```
+
+### Which calls are which
+
+| Interaction | Shape | Why |
+|---|---|---|
+| Game → Player: fetch a player before joining a session | Synchronous | The join is rejected if the player does not exist |
+| Game → Player: apply damage or grant XP | Synchronous | Game needs the resulting HP, and a lost reward corrupts player state |
+| Game → Player: player went online / offline | Asynchronous | An `online` flag; a stale one is harmless and the next call corrects it |
+| Game → Player: a session was created or ended | Asynchronous | Informational; the session is already valid without it |
+
+Receivers must tolerate a notification arriving twice or not at all: an
+asynchronous endpoint is idempotent on the event id it is given.
+
+## 4. Why this stack
+
+- **Go** — one language across the system keeps builds, Dockerfiles and HTTP
+  client code identical in every service. Goroutines make asynchronous delivery
+  a language feature rather than an added component.
+- **Gin** — request binding and struct-tag validation are most of what a CRUD
+  handler does, and Gin provides both (`ShouldBindJSON`, `binding:"required"`)
+  with almost no boilerplate.
+- **PostgreSQL** — relational data (a player owns items, a session has members)
+  with real foreign keys and transactions. One database per service keeps the
+  services independently deployable.
+- **HTTP for both shapes** — the asynchronous path posts to an ordinary REST
+  endpoint, so one contract and one client serve both. Adding a broker later
+  means changing the transport, not the contract.
+
+## 5. Trade-offs
+
+| Decision | Gain | Cost |
+|---|---|---|
+| Single language | One toolchain, shared client patterns | No language-per-workload tuning |
+| One DB per service | Independent schemas and deploys | Cross-service data needs an HTTP call, not a join |
+| Goroutine async instead of a broker | Zero extra infrastructure; async without operating a queue | **No durability** — an in-flight notification is lost if the process stops, and there is no retry or replay |
+| Synchronous only where the answer is needed | Game stays available when Player is down for everything except joins | Joins fail while Player is down |
+| No authentication | Nothing to configure to run or test the system | Every endpoint is open; auth is a later addition |
+
+The durability cost is the one that matters: notifications are best-effort.
+Anything that must not be lost belongs in a synchronous call, or in the
+receiver's own database via a request the caller retries.
+
+## 6. Out of scope (for now)
+
+Authentication and sessions, real-time push to clients, a message broker with
+durable queues, caching, and service discovery. These are deliberate omissions,
+not oversights — each would be added on top of the HTTP contract without
+changing it.
+
+## 7. Implementation status
+
+| Service | State |
+|---|---|
+| Player | `services/player_service/` — submodule, no Go source yet |
+| Game | `services/game_service/` — submodule, implementation in progress |
+
+A service counts as implemented once it has Go source, a Dockerfile, and a
+documented way to run it.
