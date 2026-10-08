@@ -1,0 +1,2104 @@
+{
+  "info": {
+    "name": "Game Service",
+    "description": "Game Service, run through the Gateway.\n\nRun the whole collection in order: it registers a player and logs in, creates its other players and items in the Player Service, plays a session through a timed action and a night of zombies, and checks that the results reached the Player Service.\n\nThree things to know before running it:\n\n1. The Gateway and both services must be up. The Game Service calls the Player Service synchronously, through the Gateway, so without them a session cannot even be created.\n2. The Gateway runs with AUTH_MODE=secret and the same JWT_SECRET as the Player Service, and the same INTERNAL_KEY as the Game Service.\n3. Start the Game Service with DEMO_SPEEDUP=60. Actions really do take 5 to 10 minutes otherwise, and the polling requests here would sit there for all of it.\n\n{{gatewayUrl}} takes every request, with Authorization: Bearer {{token}} set by the Log in request. {{gameUrl}} and {{playerUrl}} are the services themselves, used only for their /health, which the Gateway does not forward.\n\nHeadless:\n\n    npx newman run postman/game-service.postman_collection.json\n\nUsernames carry a per-run id, so it can be run repeatedly without cleaning the database.\n\nWebSockets are not covered here beyond asking the Gateway for the URL: newman cannot hold a socket open. Use go run ./scripts/wswatch 'ws://localhost:8082/game?session_id=<id>' for that.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "gatewayUrl",
+      "value": "http://localhost:8080",
+      "description": "The Gateway: every request except the two service health checks."
+    },
+    {
+      "key": "gameUrl",
+      "value": "http://localhost:8082",
+      "description": "The Game Service itself, for its health check only."
+    },
+    {
+      "key": "playerUrl",
+      "value": "http://localhost:8081",
+      "description": "The Player Service itself, for its health check only."
+    },
+    {
+      "key": "password",
+      "value": "hunter2hunter2"
+    },
+    {
+      "key": "token",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "item": [
+        {
+          "name": "Game Service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gameUrl}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// One id per run, so the collection can be run again and again without",
+                  "// cleaning the database: every username it creates is unique.",
+                  "pm.collectionVariables.set(\"run\", String(Date.now()).slice(-7));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"it is the game service\", function () {",
+                  "    pm.expect(body.service).to.eql(\"game-service\");",
+                  "});",
+                  "pm.test(\"its database is reachable\", function () {",
+                  "    pm.expect(body.database).to.eql(\"ok\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Player Service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{playerUrl}}/health",
+            "description": "The Game Service owns no player data. Without this service running, creating a session answers 502.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"the Player Service is up, which the Game Service needs\", function () {",
+                  "    pm.expect(pm.response.json().status).to.eql(\"ok\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Gateway health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "The Gateway and both services must be up: the Game Service calls the Player Service synchronously, through the Gateway, to validate players and to pay rewards."
+    },
+    {
+      "name": "2. Fixtures in the Player Service",
+      "item": [
+        {
+          "name": "Register the host player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"host_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"hostId\", body.id);",
+                  "pm.test(\"it starts at level 1 with no XP\", function () {",
+                  "    pm.expect(body.xp).to.eql(0);",
+                  "    pm.expect(body.level).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log in as the host",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"host_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "// Every later request sends this as Authorization: Bearer.",
+                  "pm.collectionVariables.set(\"token\", pm.response.json().access_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Without a token the Gateway answers 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 401\", function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create the second player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"mate_{{run}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"mateId\", body.id);",
+                  "pm.test(\"it starts at level 1 with no XP\", function () {",
+                  "    pm.expect(body.xp).to.eql(0);",
+                  "    pm.expect(body.level).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create the third player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"fill3_{{run}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"fill3Id\", body.id);",
+                  "pm.test(\"it starts at level 1 with no XP\", function () {",
+                  "    pm.expect(body.xp).to.eql(0);",
+                  "    pm.expect(body.level).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create the fourth player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"fill4_{{run}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"fill4Id\", body.id);",
+                  "pm.test(\"it starts at level 1 with no XP\", function () {",
+                  "    pm.expect(body.xp).to.eql(0);",
+                  "    pm.expect(body.level).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create the player who stays outside",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"outsider_{{run}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"outsiderId\", body.id);",
+                  "pm.test(\"it starts at level 1 with no XP\", function () {",
+                  "    pm.expect(body.xp).to.eql(0);",
+                  "    pm.expect(body.level).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add wood to the item catalog",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/items",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"wood\",\n  \"name\": \"Wood\",\n  \"category\": \"consumable\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// wood is what an action pays out. 409 means a previous run already",
+                  "// added it, which is just as good.",
+                  "pm.test(\"the item is in the catalog\", function () {",
+                  "    pm.expect(pm.response.code).to.be.oneOf([201, 409]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add coffee to the item catalog",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/items",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"coffee\",\n  \"name\": \"Coffee\",\n  \"category\": \"consumable\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// coffee is what an action pays out. 409 means a previous run already",
+                  "// added it, which is just as good.",
+                  "pm.test(\"the item is in the catalog\", function () {",
+                  "    pm.expect(pm.response.code).to.be.oneOf([201, 409]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Players and items live in the Player Service, so they are created there first, through the Gateway. The host registers with a password and logs in; the token from that login is what lets every later request past the Gateway. chop_benches pays wood and scavenge_canteen pays coffee; without them in the catalog an action completes but its payout is refused."
+    },
+    {
+      "name": "3. Sessions",
+      "item": [
+        {
+          "name": "Create a session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"UTM block 3 - {{run}}\",\n  \"host_player_id\": \"{{hostId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Validates the host against the Player Service first, then seats them."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"sessionId\", body.id);",
+                  "pm.test(\"it starts in the day, on cycle 1\", function () {",
+                  "    pm.expect(body.phase).to.eql(\"day\");",
+                  "    pm.expect(body.cycle).to.eql(1);",
+                  "});",
+                  "pm.test(\"the host is its first member\", function () {",
+                  "    pm.expect(body.members[0].player_id).to.eql(pm.collectionVariables.get(\"hostId\"));",
+                  "});",
+                  "pm.test(\"the phase has a deadline, so the cycle is timed\", function () {",
+                  "    pm.expect(body.phase_ends_at).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ask the Gateway where the live socket is",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/ws/game",
+            "description": "The Gateway only negotiates: it answers with the URL and the client then connects straight to the Game Service, adding ?session_id=. The socket is a plain WebSocket, whatever the protocol field says."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"it points at the Game Service, not at the Gateway\", function () {",
+                  "    pm.expect(body.url).to.match(/^ws:\\/\\/.*\\/game$/);",
+                  "});",
+                  "const wsUrl = body.url + \"?session_id=\" + pm.collectionVariables.get(\"sessionId\");",
+                  "pm.collectionVariables.set(\"wsUrl\", wsUrl);",
+                  "console.log(\"connect to: \" + wsUrl);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List sessions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"the answer is a list\", function () {",
+                  "    pm.expect(pm.response.json()).to.be.an(\"array\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List only active sessions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions?status=active"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject an unknown status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions?status=banana"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read one session",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"it comes back with its members\", function () {",
+                  "    pm.expect(pm.response.json().members).to.be.an(\"array\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An unknown session is 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/11111111-1111-1111-1111-111111111111"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A non-UUID id is 400",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/not-a-uuid"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An unknown host player is 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"nobody home\",\n  \"host_player_id\": \"11111111-1111-1111-1111-111111111111\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 422\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "// 422, not 404: the request was well formed but names a player the",
+                  "// Player Service has never heard of."
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A session needs a name",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"   \",\n  \"host_player_id\": \"{{hostId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Membership",
+      "item": [
+        {
+          "name": "A second player joins",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{mateId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "pm.test(\"the seat records when they joined\", function () {",
+                  "    pm.expect(pm.response.json().joined_at).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Joining twice is 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{mateId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An unknown player is 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"11111111-1111-1111-1111-111111111111\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 422\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Presence reached the Player Service",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/players/{{mateId}}",
+            "description": "Presence is sent from a goroutine after the join has already been answered, so this request waits a beat first. Nobody is waiting on that call: a stale flag is harmless and the next one corrects it."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Postman has no sleep and the engine ticks once a second, so wait a beat",
+                  "// before polling again. With newman you can also pass --delay-request 1000.",
+                  "const until = Date.now() + 1000;",
+                  "while (Date.now() < until) { /* deliberate busy wait */ }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"the player is marked online\", function () {",
+                  "    pm.expect(pm.response.json().is_online).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Third player joins",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{fill3Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fourth player joins",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{fill4Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A fifth player is refused",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{outsiderId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "pm.test(\"because the session is full\", function () {",
+                  "    pm.expect(pm.response.json().error).to.include(\"full\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Timed actions",
+      "item": [
+        {
+          "name": "An unknown action type is 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"eat_pizza\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"and it lists what is allowed\", function () {",
+                  "    pm.expect(pm.response.json().error).to.include(\"chop_benches\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "clear_room needs a room",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"clear_room\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A non-member cannot act",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{outsiderId}}\",\n  \"type\": \"repair_base\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Start scavenge the canteen",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"scavenge_canteen\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "202 Accepted, not 201: the action has been written down with a deadline and the engine will finish it. Watch it happen with go run ./scripts/wswatch."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 202\", function () {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set(\"actionId\", body.id);",
+                  "pm.test(\"it is accepted, not done: 202 and still running\", function () {",
+                  "    pm.expect(body.status).to.eql(\"running\");",
+                  "});",
+                  "pm.test(\"the reward is decided up front\", function () {",
+                  "    pm.expect(body.xp_awarded).to.eql(25);",
+                  "    pm.expect(body.reward_item_code).to.eql(\"coffee\");",
+                  "});",
+                  "pm.test(\"it has a deadline to be finished at\", function () {",
+                  "    pm.expect(body.finishes_at).to.be.a(\"string\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A second action for the same player is 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"repair_base\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "One action at a time per player. Enforced by a partial unique index on (session_id, player_id) WHERE status = 'running'."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Another player can act at the same time",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{mateId}}\",\n  \"type\": \"barricade_room\",\n  \"room\": \"lab 301\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 202\", function () {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "pm.collectionVariables.set(\"mateActionId\", pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel a running action",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions/{{mateActionId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"it is cancelled and pays nothing\", function () {",
+                  "    pm.expect(pm.response.json().status).to.eql(\"cancelled\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancelling it again is 409",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions/{{mateActionId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List the session's actions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List only the running ones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions?status=running"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read one action and see its progress",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions/{{actionId}}",
+            "description": "percent and seconds_remaining are worked out from the clock when read, so nothing has to keep them up to date."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"progress is reported\", function () {",
+                  "    pm.expect(body.percent).to.be.at.least(0);",
+                  "    pm.expect(body.seconds_remaining).to.be.at.least(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An unknown action is 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions/11111111-1111-1111-1111-111111111111"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel the host's action",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions/{{actionId}}",
+            "description": "The payout is proved in the next folder, on a session too young for a zombie to have interfered. This one is cancelled so it does not pay out in the background and move those numbers."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. A reward crossing into the Player Service",
+      "item": [
+        {
+          "name": "Create a player for the reward test",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"reward_{{run}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "pm.collectionVariables.set(\"rewardPlayerId\", pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create a fresh session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"reward {{run}}\",\n  \"host_player_id\": \"{{rewardPlayerId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "pm.collectionVariables.set(\"rewardSessionId\", pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Start the action straight away",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{rewardSessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{rewardPlayerId}}\",\n  \"type\": \"scavenge_canteen\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 202\", function () {",
+                  "    pm.response.to.have.status(202);",
+                  "});",
+                  "pm.collectionVariables.set(\"rewardActionId\", pm.response.json().id);",
+                  "pm.collectionVariables.set(\"polls\", 0);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wait for the engine to finish it",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{rewardSessionId}}/actions/{{rewardActionId}}",
+            "description": "Polls itself with postman.setNextRequest until the action is done. Run the service with DEMO_SPEEDUP=60 or this waits ten real minutes."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Postman has no sleep and the engine ticks once a second, so wait a beat",
+                  "// before polling again. With newman you can also pass --delay-request 1000.",
+                  "const until = Date.now() + 1000;",
+                  "while (Date.now() < until) { /* deliberate busy wait */ }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "const polls = Number(pm.collectionVariables.get(\"polls\") || 0);",
+                  "",
+                  "// Poll until the engine completes it. At DEMO_SPEEDUP=60 a five minute",
+                  "// scavenge takes five seconds; the cap stops this looping forever if",
+                  "// the engine is not running.",
+                  "if (body.status === \"running\" && polls < 40) {",
+                  "    pm.collectionVariables.set(\"polls\", polls + 1);",
+                  "    postman.setNextRequest(\"Wait for the engine to finish it\");",
+                  "} else {",
+                  "    pm.test(\"the engine completed it on its own\", function () {",
+                  "        pm.expect(body.status).to.eql(\"completed\");",
+                  "    });",
+                  "    pm.test(\"it reached 100%\", function () {",
+                  "        pm.expect(body.percent).to.eql(100);",
+                  "    });",
+                  "    pm.test(\"the reward reached the Player Service\", function () {",
+                  "        pm.expect(body.reward_synced, body.reward_error || \"no error\").to.be.true;",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The XP landed on the player",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/players/{{rewardPlayerId}}",
+            "description": "This is the whole point of the two services: the Game Service decided the action finished, and the player's XP changed in the service that owns it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"scavenging paid its 25 XP\", function () {",
+                  "    pm.expect(pm.response.json().xp).to.eql(25);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The coffee landed too",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/players/{{rewardPlayerId}}/inventory"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const coffee = pm.response.json().find(function (line) {",
+                  "    return line.item_code === \"coffee\";",
+                  "});",
+                  "pm.test(\"the inventory holds the coffee it found\", function () {",
+                  "    pm.expect(coffee, \"no coffee line\").to.not.be.undefined;",
+                  "    pm.expect(coffee.quantity).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete the reward session",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{rewardSessionId}}",
+            "description": "A session never ends by itself: it keeps cycling day and night, spawning zombies, until it is ended or deleted."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 204\", function () {",
+                  "    pm.response.to.have.status(204);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Its own session and player, with the action started immediately. A day lasts ten seconds at DEMO_SPEEDUP=60, so a session left sitting around is already at night, where a zombie changes the very XP this asserts on."
+    },
+    {
+      "name": "7. Day, night and zombies",
+      "item": [
+        {
+          "name": "Bring on the night",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phase\": \"night\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The cycle turns over on its own when a phase runs out; this is the manual override, and it starts a night the same way."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"it is night\", function () {",
+                  "    pm.expect(pm.response.json().phase).to.eql(\"night\");",
+                  "});",
+                  "pm.collectionVariables.set(\"polls\", 0);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An invalid phase is 400",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phase\": \"dusk\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An empty patch is 400",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wait for zombies to spawn",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/zombies",
+            "description": "Zombies are spawned by the engine on its next tick, not by the request that turned the session to night."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Postman has no sleep and the engine ticks once a second, so wait a beat",
+                  "// before polling again. With newman you can also pass --delay-request 1000.",
+                  "const until = Date.now() + 1000;",
+                  "while (Date.now() < until) { /* deliberate busy wait */ }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const zombies = pm.response.json();",
+                  "const polls = Number(pm.collectionVariables.get(\"polls\") || 0);",
+                  "",
+                  "if (zombies.length === 0 && polls < 20) {",
+                  "    pm.collectionVariables.set(\"polls\", polls + 1);",
+                  "    postman.setNextRequest(\"Wait for zombies to spawn\");",
+                  "} else {",
+                  "    pm.collectionVariables.set(\"polls\", 0);",
+                  "    pm.test(\"night brought zombies out\", function () {",
+                  "        pm.expect(zombies.length).to.be.at.least(1);",
+                  "    });",
+                  "    pm.test(\"each belongs to a cycle and expires within it\", function () {",
+                  "        zombies.forEach(function (z) {",
+                  "            pm.expect(z.type).to.be.oneOf([\"professor\", \"tourist\"]);",
+                  "            pm.expect(z.expires_at).to.be.a(\"string\");",
+                  "        });",
+                  "    });",
+                  "    console.log(\"spawned: \" + zombies.map(function (z) { return z.type; }).join(\", \"));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wait for a zombie to attack",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/zombies",
+            "description": "A professor zombie asks the Exam Service (the built-in mock unless EXAM_SERVICE_URL is set) and applies the result as XP. A tourist zombie steals an item, or XP if the player carries nothing."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Postman has no sleep and the engine ticks once a second, so wait a beat",
+                  "// before polling again. With newman you can also pass --delay-request 1000.",
+                  "const until = Date.now() + 1000;",
+                  "while (Date.now() < until) { /* deliberate busy wait */ }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const known = [\"exam_passed\", \"exam_failed\", \"stole_xp\", \"stole_item\", \"no_target\"];",
+                  "const zombies = pm.response.json();",
+                  "const resolved = zombies.filter(function (z) {",
+                  "    return known.indexOf(z.outcome) !== -1;",
+                  "});",
+                  "const polls = Number(pm.collectionVariables.get(\"polls\") || 0);",
+                  "",
+                  "// A zombie strikes a third of the way into the night.",
+                  "if (resolved.length === 0 && polls < 30) {",
+                  "    pm.collectionVariables.set(\"polls\", polls + 1);",
+                  "    postman.setNextRequest(\"Wait for a zombie to attack\");",
+                  "} else {",
+                  "    pm.collectionVariables.set(\"polls\", 0);",
+                  "    pm.test(\"a zombie attacked somebody\", function () {",
+                  "        pm.expect(resolved.length).to.be.at.least(1);",
+                  "    });",
+                  "    pm.test(\"it attacked a member and said what happened\", function () {",
+                  "        resolved.forEach(function (z) {",
+                  "            pm.expect(z.status).to.eql(\"attacked\");",
+                  "            if (z.outcome !== \"no_target\") {",
+                  "                pm.expect(z.target_player_id).to.not.be.null;",
+                  "            }",
+                  "        });",
+                  "    });",
+                  "    const exams = resolved.filter(function (z) {",
+                  "        return z.outcome === \"exam_passed\" || z.outcome === \"exam_failed\";",
+                  "    });",
+                  "    if (exams.length > 0) {",
+                  "        pm.test(\"a professor zombie used the Exam Service\", function () {",
+                  "            pm.expect(exams[0].detail).to.be.a(\"string\");",
+                  "        });",
+                  "    }",
+                  "    resolved.forEach(function (z) {",
+                  "        console.log(z.type + \": \" + z.outcome + \" (\" + z.xp_delta + \" xp) \" + z.detail);",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "8. Leaving and ending",
+      "item": [
+        {
+          "name": "The host leaves",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players/{{hostId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"the host role passes to the longest-serving member\", function () {",
+                  "    pm.expect(pm.response.json().host_player_id).to.eql(pm.collectionVariables.get(\"mateId\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Leaving twice is 409",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players/{{hostId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "End the session",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"ended\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"it is over\", function () {",
+                  "    pm.expect(pm.response.json().status).to.eql(\"ended\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An ended session takes no phase change",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phase\": \"day\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "And accepts no new actions",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": \"{{mateId}}\",\n  \"type\": \"repair_base\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 409\", function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete the session",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "description": "Cascades to its members, actions and zombies."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 204\", function () {",
+                  "    pm.response.to.have.status(204);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "It is gone",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  }
+}
