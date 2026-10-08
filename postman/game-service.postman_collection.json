@@ -134,6 +134,38 @@
       "name": "2. Fixtures in the Player Service",
       "item": [
         {
+          "name": "With an invalid token the Gateway answers 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "not-a-real-token",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Sends a token the Gateway cannot verify. A request with no token at all is refused the same way, but Postman keeps the access_token cookie from an earlier login and would send it by itself, so an explicit bad token is what makes this check repeatable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 401\", function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "Register the host player",
           "request": {
             "method": "POST",
@@ -212,30 +244,6 @@
                   "});",
                   "// Every later request sends this as Authorization: Bearer.",
                   "pm.collectionVariables.set(\"token\", pm.response.json().access_token);"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Without a token the Gateway answers 401",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": "{{gatewayUrl}}/game/sessions",
-            "auth": {
-              "type": "noauth"
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test(\"status is 401\", function () {",
-                  "    pm.response.to.have.status(401);",
-                  "});"
                 ]
               }
             }

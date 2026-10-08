@@ -106,14 +106,22 @@
       "description": "Register and log in are the only two routes the Gateway lets through without a token.",
       "item": [
         {
-          "name": "A request without a token is 401",
+          "name": "A request with an invalid token is 401",
           "request": {
             "method": "GET",
             "header": [],
             "url": "{{baseUrl}}/players",
             "auth": {
-              "type": "noauth"
-            }
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "not-a-real-token",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Sends a token the Gateway cannot verify. A request with no token at all is refused the same way, but Postman keeps the access_token cookie from an earlier login and would send it by itself, so an explicit bad token is what makes this check repeatable."
           },
           "event": [
             {
