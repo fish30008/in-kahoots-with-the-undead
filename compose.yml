@@ -22,6 +22,9 @@ services:
       DATABASE_URL: postgres://${PLAYER_POSTGRES_USER:-postgres}:${PLAYER_POSTGRES_PASSWORD:-qwerty}@player-db:5432/${PLAYER_POSTGRES_DB:-player}?sslmode=disable
       # Signs the access tokens; the gateway verifies them with the same value.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      # Checked on GET /events, the WebSocket Base, Crafting and Resource read
+      # Player's events from.
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
     ports:
@@ -271,9 +274,9 @@ services:
       DB_NAME: ${RESOURCE_POSTGRES_DB:-resource}
       # World is called through the gateway; empty = built-in World mock
       WORLD_SERVICE_URL: ${RESOURCE_WORLD_SERVICE_URL-http://gateway:8080}
-      # empty = not connected (use POST /resources/internal/events): the Go player
-      # and game services do not serve /events. `gateway` = ask the gateway for
-      # the producer's /events URL, then connect directly.
+      # empty = not connected (use POST /resources/internal/events): the game
+      # service does not serve /events yet. `gateway` = ask the gateway for the
+      # producer's /events URL, then connect directly.
       PLAYER_EVENTS_URL: ${RESOURCE_PLAYER_EVENTS_URL-}
       GAME_EVENTS_URL: ${RESOURCE_GAME_EVENTS_URL-}
       GATEWAY_URL: http://gateway:8080
