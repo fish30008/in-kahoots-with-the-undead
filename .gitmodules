@@ -7,3 +7,6 @@
 [submodule "services/player_service"]
 	path = services/player_service
 	url = https://github.com/fish30008/player_service.git
+[submodule "services/service_discovery"]
+	path = services/service_discovery
+	url = https://github.com/fish30008/service_discovery.git
