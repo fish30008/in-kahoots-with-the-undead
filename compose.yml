@@ -314,6 +314,9 @@ services:
     environment:
       # Checked on every call except /health.
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      # Health alerts also go to this Telegram chat; empty means the log only.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     ports:
       # Published for the health check and for reading GET /services by hand.
       - "${DISCOVERY_PORT:-8090}:8090"
