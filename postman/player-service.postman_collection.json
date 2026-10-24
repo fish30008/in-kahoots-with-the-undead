@@ -317,7 +317,7 @@
       "name": "Players",
       "item": [
         {
-          "name": "Create second player",
+          "name": "Register a second player",
           "event": [
             {
               "listen": "prerequest",
@@ -349,14 +349,14 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"{{secondUsername}}\",\n  \"display_name\": \"Bob\"\n}",
+              "raw": "{\n  \"username\": \"{{secondUsername}}\",\n  \"password\": \"{{password}}\",\n  \"display_name\": \"Bob\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "url": "{{baseUrl}}/players",
+            "url": "{{baseUrl}}/auth/register",
             "description": "POST /players still creates a player, but one without a password: they cannot log in."
           }
         },
@@ -531,7 +531,12 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "pm.test('player now holds 5', () => pm.expect(pm.response.json().quantity).to.eql(5));"
+                  "pm.test('player now holds 5', () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.itemId).to.eql(pm.collectionVariables.get('itemCode'));",
+                  "    pm.expect(body.type).to.eql('consumable');",
+                  "    pm.expect(body.quantity).to.eql(5);",
+                  "});"
                 ]
               }
             }
@@ -546,14 +551,14 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"item_code\": \"{{itemCode}}\",\n  \"quantity\": 5\n}",
+              "raw": "{\n  \"itemId\": \"{{itemCode}}\",\n  \"quantity\": 5\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "url": "{{baseUrl}}/players/{{playerId}}/inventory",
+            "url": "{{baseUrl}}/players/{{playerId}}/inventory/items",
             "description": "Grants items. Called again with the same item, it adds to the amount already held."
           }
         },
@@ -617,6 +622,210 @@
             "url": "{{baseUrl}}/players/{{playerId}}/inventory",
             "description": "Every line the player owns, joined with the item catalog."
           }
+        },
+        {
+          "name": "An item that is not in the catalog is 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 Unprocessable Entity\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"itemId\": \"no_such_item\",\n  \"quantity\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/players/{{playerId}}/inventory/items"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Trades",
+      "description": "The logged-in player gives items to the second player. The sender is the player the token belongs to, never a field in the body.",
+      "item": [
+        {
+          "name": "Give 1 item to the second player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/trades",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"toPlayerId\": {{secondPlayerId}},\n  \"itemId\": \"{{itemCode}}\",\n  \"quantity\": 1\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('the trade is recorded as completed', () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.tradeId).to.be.a('string');",
+                  "    pm.expect(body.status).to.eql('completed');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The item left the sender",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/players/{{playerId}}/inventory"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('2 left after giving 1 of 3', () => {",
+                  "    const line = pm.response.json().find(l => l.item_code === pm.collectionVariables.get('itemCode'));",
+                  "    pm.expect(line.quantity).to.eql(2);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "And reached the receiver",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/players/{{secondPlayerId}}/inventory"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('the second player now holds 1', () => {",
+                  "    const line = pm.response.json().find(l => l.item_code === pm.collectionVariables.get('itemCode'));",
+                  "    pm.expect(line.quantity).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Giving more than you hold is 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/trades",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"toPlayerId\": {{secondPlayerId}},\n  \"itemId\": \"{{itemCode}}\",\n  \"quantity\": 100\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Trading with yourself is 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/trades",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"toPlayerId\": {{playerId}},\n  \"itemId\": \"{{itemCode}}\",\n  \"quantity\": 1\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 Unprocessable Entity', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "An unknown receiver is 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/trades",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"toPlayerId\": 99999999,\n  \"itemId\": \"{{itemCode}}\",\n  \"quantity\": 1\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
         }
       ]
     },

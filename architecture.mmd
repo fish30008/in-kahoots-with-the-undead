@@ -11,7 +11,7 @@ flowchart TB
 
     subgraph services["Services · each owns its own PostgreSQL · service-to-service REST goes back through the gateway with X-Internal-Key"]
         direction LR
-        player["<b>Player</b> · Go / chi · :8081<br/>players, login + JWT, XP, presence,<br/>item catalog, inventory"]
+        player["<b>Player</b> · Go / chi · :8081<br/>players, login + JWT, XP, presence,<br/>item catalog, inventory, trades"]
         game["<b>Game</b> · Go / chi + gorilla WebSocket · :8082<br/>sessions, day/night, timed actions, zombies<br/>PostgreSQL only, no Redis"]
         exam["<b>Exam</b> · NestJS · :8083<br/>exams, grades,<br/>achievements"]
         world["<b>World</b> · NestJS · :8084<br/>campus map, rooms,<br/>resource nodes"]
@@ -21,8 +21,8 @@ flowchart TB
         crafting["<b>Crafting</b> · Go · :8088<br/>recipes, atomic<br/>crafting"]
     end
 
-    gateway <-- "/auth /players" --> player
-    gateway <-- "/game<br/>calls Player (XP, presence,<br/>inventory), Exam (mock by default)" --> game
+    gateway <-- "/auth /players /trades" --> player
+    gateway <-- "/game<br/>calls Player (XP, presence,<br/>inventory), World (rooms),<br/>Exam (mock by default)" --> game
     gateway <-- "/exams<br/>calls Zombie, Player" --> exam
     gateway <-- "/world" --> world
     gateway <-- "/zombies" --> zombie
@@ -35,8 +35,10 @@ flowchart TB
     world -. "world.wing_unlocked" .-> crafting
     player -. "player.registered" .-> base
     player -. "player.leveled_up" .-> crafting
+    player -. "player.registered" .-> resource
+    game -. "game.action_completed" .-> resource
 
-    legend["<b>Legend</b><br/>solid: REST through the gateway<br/>dashed: WebSocket opened directly on the producer<br/>(service /events streams are negotiated at the gateway too; Player, Exam, World and Resource serve one)<br/>green border: our services · blue: Go · yellow: NestJS · dark: gateway (banned language)"]
+    legend["<b>Legend</b><br/>solid: REST through the gateway<br/>dashed: WebSocket opened directly on the producer<br/>(service /events streams are negotiated at the gateway too; Player, Game, Exam, World and Resource serve one)<br/>green border: our services · blue: Go · yellow: NestJS · dark: gateway (banned language)"]
     services ~~~ legend
 
     classDef gw fill:#1f2937,color:#ffffff,stroke:#111827,stroke-width:2px

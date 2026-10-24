@@ -1,0 +1,20 @@
+# Builds our four services from the submodule working trees instead of pulling
+# the published images. Use it to test a change before it is committed:
+#
+#   docker compose -f compose.yml -f compose.local.yml up -d --build
+services:
+  player:
+    image: player_service:local
+    build: ./services/player_service
+
+  game:
+    image: game_service:local
+    build: ./services/game_service
+
+  gateway:
+    image: gateway_service:local
+    build: ./services/gateway_service
+
+  discovery:
+    image: service_discovery:local
+    build: ./services/service_discovery

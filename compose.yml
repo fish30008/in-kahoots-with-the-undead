@@ -27,12 +27,16 @@ services:
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
-    ports:
-      # Published for the health check only; every other request goes through
-      # the gateway.
-      - "${PLAYER_PORT:-8081}:${PLAYER_PORT:-8081}"
+      # Registers there on startup, under its own container hostname.
+      DISCOVERY_URL: http://discovery:8090
+    # Several copies, so no port is published: they cannot share one on the host.
+    # Every request reaches them through the gateway, which takes them in turn.
+    deploy:
+      replicas: ${PLAYER_REPLICAS:-2}
     depends_on:
       player-db:
+        condition: service_healthy
+      discovery:
         condition: service_healthy
 
   game-db:
@@ -63,6 +67,8 @@ services:
       # Service-to-service REST goes through the gateway, which forwards
       # /players to the player service.
       PLAYER_SERVICE_URL: http://gateway:8080
+      # Asked about the room an action starts in; also through the gateway.
+      WORLD_SERVICE_URL: http://gateway:8080
       # Sent as X-Internal-Key, so the gateway accepts game as a service.
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       # Empty means the built-in exam mock.
@@ -74,12 +80,16 @@ services:
       DEMO_SPEEDUP: ${DEMO_SPEEDUP:-1}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
+      # Registers there on startup, under its own container hostname.
+      DISCOVERY_URL: http://discovery:8090
     ports:
       # Published because the live WebSocket goes straight to this service: the
       # gateway only hands out its URL (GET /ws/game).
       - "${GAME_PORT:-8082}:${GAME_PORT:-8082}"
     depends_on:
       game-db:
+        condition: service_healthy
+      discovery:
         condition: service_healthy
 
   base-db:
@@ -274,15 +284,30 @@ services:
       DB_NAME: ${RESOURCE_POSTGRES_DB:-resource}
       # World is called through the gateway; empty = built-in World mock
       WORLD_SERVICE_URL: ${RESOURCE_WORLD_SERVICE_URL-http://gateway:8080}
-      # empty = not connected (use POST /resources/internal/events): the game
-      # service does not serve /events yet. `gateway` = ask the gateway for the
-      # producer's /events URL, then connect directly.
-      PLAYER_EVENTS_URL: ${RESOURCE_PLAYER_EVENTS_URL-}
-      GAME_EVENTS_URL: ${RESOURCE_GAME_EVENTS_URL-}
+      # `gateway` = ask the gateway for the producer's /events URL, then connect
+      # directly; empty = not connected (use POST /resources/internal/events)
+      PLAYER_EVENTS_URL: ${RESOURCE_PLAYER_EVENTS_URL-gateway}
+      GAME_EVENTS_URL: ${RESOURCE_GAME_EVENTS_URL-gateway}
       GATEWAY_URL: http://gateway:8080
     depends_on:
       resource-db:
         condition: service_healthy
+
+  discovery:
+    # Keeps the list of running service instances; they register on startup.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/service_discovery:${DISCOVERY_SERVICE_TAG:-3}
+    restart: unless-stopped
+    environment:
+      # Checked on every call except /health.
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+    ports:
+      # Published for the health check and for reading GET /services by hand.
+      - "${DISCOVERY_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   gateway:
     # The single point of entry: http://localhost:8080.
@@ -299,15 +324,18 @@ services:
       CRAFTING_SERVICE_URL: http://crafting:${CRAFTING_PORT:-8088}
       # Handed to clients by GET /ws/game, so it is the address on the host.
       GAME_PUBLIC_WS_URL: ws://localhost:${GAME_PORT:-8082}
-      # HS256 with the secret the player service signs its tokens with.
-      AUTH_MODE: secret
+      # Verifies the HS256 tokens the player service signs with the same value.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
+      # The list of running instances is read from here; a service that is not
+      # on it is reached at its fixed URL above.
+      DISCOVERY_URL: http://discovery:8090
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
+      - discovery
       - player
       - game
       - exam

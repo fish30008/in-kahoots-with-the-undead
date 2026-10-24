@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Game Service",
-    "description": "Game Service, run through the Gateway.\n\nRun the whole collection in order: it registers a player and logs in, creates its other players and items in the Player Service, plays a session through a timed action and a night of zombies, and checks that the results reached the Player Service.\n\nThree things to know before running it:\n\n1. The Gateway and both services must be up. The Game Service calls the Player Service synchronously, through the Gateway, so without them a session cannot even be created.\n2. The Gateway runs with AUTH_MODE=secret and the same JWT_SECRET as the Player Service, and the same INTERNAL_KEY as the Game Service.\n3. Start the Game Service with DEMO_SPEEDUP=60. Actions really do take 5 to 10 minutes otherwise, and the polling requests here would sit there for all of it.\n\n{{gatewayUrl}} takes every request, with Authorization: Bearer {{token}} set by the Log in request. {{gameUrl}} and {{playerUrl}} are the services themselves, used only for their /health, which the Gateway does not forward.\n\nHeadless:\n\n    npx newman run postman/game-service.postman_collection.json\n\nUsernames carry a per-run id, so it can be run repeatedly without cleaning the database.\n\nWebSockets are not covered here beyond asking the Gateway for the URL: newman cannot hold a socket open. Use go run ./scripts/wswatch 'ws://localhost:8082/game?session_id=<id>' for that.",
+    "description": "Game Service, run through the Gateway.\n\nRun the whole collection in order: it registers a player and logs in, creates its other players in the Player Service, plays a session through a timed action and a night of zombies, and checks that the results reached the Player Service.\n\nThree things to know before running it:\n\n1. The Gateway and both services must be up. The Game Service calls the Player Service synchronously, through the Gateway, so without them a session cannot even be created.\n2. The Gateway runs with AUTH_MODE=secret and the same JWT_SECRET as the Player Service, and the same INTERNAL_KEY as the Game Service.\n3. Start the Game Service with DEMO_SPEEDUP=60. Actions really do take 5 to 10 minutes otherwise, and the polling requests here would sit there for all of it.\n\n{{gatewayUrl}} takes every request, with Authorization: Bearer {{token}} set by the Log in request. {{gameUrl}} and {{playerUrl}} are the services themselves, used only for their /health, which the Gateway does not forward.\n\nHeadless:\n\n    npx newman run postman/game-service.postman_collection.json\n\nUsernames carry a per-run id, so it can be run repeatedly without cleaning the database.\n\nWebSockets are not covered here beyond asking the Gateway for the URL: newman cannot hold a socket open. Use go run ./scripts/wswatch 'ws://localhost:8082/game?session_id=<id>' for that.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -27,6 +27,10 @@
     {
       "key": "token",
       "value": ""
+    },
+    {
+      "key": "internalKey",
+      "value": "changeme"
     }
   ],
   "item": [
@@ -250,7 +254,7 @@
           ]
         },
         {
-          "name": "Create the second player",
+          "name": "Register the second player",
           "request": {
             "method": "POST",
             "header": [
@@ -259,10 +263,10 @@
                 "value": "application/json"
               }
             ],
-            "url": "{{gatewayUrl}}/players",
+            "url": "{{gatewayUrl}}/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"mate_{{run}}\"\n}",
+              "raw": "{\n  \"username\": \"mate_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -291,7 +295,7 @@
           ]
         },
         {
-          "name": "Create the third player",
+          "name": "Register the third player",
           "request": {
             "method": "POST",
             "header": [
@@ -300,10 +304,10 @@
                 "value": "application/json"
               }
             ],
-            "url": "{{gatewayUrl}}/players",
+            "url": "{{gatewayUrl}}/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"fill3_{{run}}\"\n}",
+              "raw": "{\n  \"username\": \"fill3_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -332,7 +336,7 @@
           ]
         },
         {
-          "name": "Create the fourth player",
+          "name": "Register the fourth player",
           "request": {
             "method": "POST",
             "header": [
@@ -341,10 +345,10 @@
                 "value": "application/json"
               }
             ],
-            "url": "{{gatewayUrl}}/players",
+            "url": "{{gatewayUrl}}/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"fill4_{{run}}\"\n}",
+              "raw": "{\n  \"username\": \"fill4_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -373,7 +377,7 @@
           ]
         },
         {
-          "name": "Create the player who stays outside",
+          "name": "Register the player who stays outside",
           "request": {
             "method": "POST",
             "header": [
@@ -382,10 +386,10 @@
                 "value": "application/json"
               }
             ],
-            "url": "{{gatewayUrl}}/players",
+            "url": "{{gatewayUrl}}/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"outsider_{{run}}\"\n}",
+              "raw": "{\n  \"username\": \"outsider_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -412,83 +416,9 @@
               }
             }
           ]
-        },
-        {
-          "name": "Add wood to the item catalog",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": "{{gatewayUrl}}/players/items",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"code\": \"wood\",\n  \"name\": \"Wood\",\n  \"category\": \"consumable\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// wood is what an action pays out. 409 means a previous run already",
-                  "// added it, which is just as good.",
-                  "pm.test(\"the item is in the catalog\", function () {",
-                  "    pm.expect(pm.response.code).to.be.oneOf([201, 409]);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Add coffee to the item catalog",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": "{{gatewayUrl}}/players/items",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"code\": \"coffee\",\n  \"name\": \"Coffee\",\n  \"category\": \"consumable\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// coffee is what an action pays out. 409 means a previous run already",
-                  "// added it, which is just as good.",
-                  "pm.test(\"the item is in the catalog\", function () {",
-                  "    pm.expect(pm.response.code).to.be.oneOf([201, 409]);",
-                  "});"
-                ]
-              }
-            }
-          ]
         }
       ],
-      "description": "Players and items live in the Player Service, so they are created there first, through the Gateway. The host registers with a password and logs in; the token from that login is what lets every later request past the Gateway. chop_benches pays wood and scavenge_canteen pays coffee; without them in the catalog an action completes but its payout is refused."
+      "description": "Players live in the Player Service, so they are created there first, through the Gateway. The host registers with a password and logs in; the token it gets is sent on every later request."
     },
     {
       "name": "3. Sessions",
@@ -506,7 +436,7 @@
             "url": "{{gatewayUrl}}/game/sessions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"UTM block 3 - {{run}}\",\n  \"host_player_id\": \"{{hostId}}\"\n}",
+              "raw": "{\n  \"name\": \"UTM block 3 - {{run}}\",\n  \"host_player_id\": {{hostId}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -715,7 +645,7 @@
             "url": "{{gatewayUrl}}/game/sessions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"nobody home\",\n  \"host_player_id\": \"11111111-1111-1111-1111-111111111111\"\n}",
+              "raw": "{\n  \"name\": \"nobody home\",\n  \"host_player_id\": 99999999\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -752,7 +682,7 @@
             "url": "{{gatewayUrl}}/game/sessions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"   \",\n  \"host_player_id\": \"{{hostId}}\"\n}",
+              "raw": "{\n  \"name\": \"   \",\n  \"host_player_id\": {{hostId}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -792,7 +722,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{mateId}}\"\n}",
+              "raw": "{\n  \"player_id\": {{mateId}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -830,7 +760,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{mateId}}\"\n}",
+              "raw": "{\n  \"player_id\": {{mateId}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -865,7 +795,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"11111111-1111-1111-1111-111111111111\"\n}",
+              "raw": "{\n  \"player_id\": 99999999\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -937,7 +867,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{fill3Id}}\"\n}",
+              "raw": "{\n  \"player_id\": {{fill3Id}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -972,7 +902,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{fill4Id}}\"\n}",
+              "raw": "{\n  \"player_id\": {{fill4Id}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1007,7 +937,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/players",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{outsiderId}}\"\n}",
+              "raw": "{\n  \"player_id\": {{outsiderId}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1050,7 +980,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"eat_pizza\"\n}",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"eat_pizza\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1076,7 +1006,7 @@
           ]
         },
         {
-          "name": "clear_room needs a room",
+          "name": "An action needs a room",
           "request": {
             "method": "POST",
             "header": [
@@ -1088,7 +1018,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"clear_room\"\n}",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"clear_room\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1111,6 +1041,120 @@
           ]
         },
         {
+          "name": "A room the World Service does not know is 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"clear_room\",\n  \"room_id\": 99999\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 422\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "pm.test(\"and it says why\", function () {",
+                  "    pm.expect(pm.response.json().error).to.include(\"unknown room\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A locked room is 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"clear_room\",\n  \"room_id\": 6\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 422\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "pm.test(\"and it says why\", function () {",
+                  "    pm.expect(pm.response.json().error).to.include(\"locked\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Scavenging a room with nothing to gather is 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"scavenge\",\n  \"room_id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 422\", function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "pm.test(\"and it says why\", function () {",
+                  "    pm.expect(pm.response.json().error).to.include(\"resource node\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "A non-member cannot act",
           "request": {
             "method": "POST",
@@ -1123,7 +1167,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{outsiderId}}\",\n  \"type\": \"repair_base\"\n}",
+              "raw": "{\n  \"player_id\": {{outsiderId}},\n  \"type\": \"repair_base\",\n  \"room_id\": 1\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1146,7 +1190,7 @@
           ]
         },
         {
-          "name": "Start scavenge the canteen",
+          "name": "Start scavenging a room",
           "request": {
             "method": "POST",
             "header": [
@@ -1158,7 +1202,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"scavenge_canteen\"\n}",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"scavenge\",\n  \"room_id\": 3\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1181,9 +1225,12 @@
                   "pm.test(\"it is accepted, not done: 202 and still running\", function () {",
                   "    pm.expect(body.status).to.eql(\"running\");",
                   "});",
-                  "pm.test(\"the reward is decided up front\", function () {",
+                  "pm.test(\"the XP is decided up front\", function () {",
                   "    pm.expect(body.xp_awarded).to.eql(25);",
-                  "    pm.expect(body.reward_item_code).to.eql(\"coffee\");",
+                  "});",
+                  "pm.test(\"it remembers the room and its resource node\", function () {",
+                  "    pm.expect(body.room_id).to.eql(3);",
+                  "    pm.expect(body.node_id).to.be.a(\"number\");",
                   "});",
                   "pm.test(\"it has a deadline to be finished at\", function () {",
                   "    pm.expect(body.finishes_at).to.be.a(\"string\");",
@@ -1206,7 +1253,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{hostId}}\",\n  \"type\": \"repair_base\"\n}",
+              "raw": "{\n  \"player_id\": {{hostId}},\n  \"type\": \"repair_base\",\n  \"room_id\": 1\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1242,7 +1289,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{mateId}}\",\n  \"type\": \"barricade_room\",\n  \"room\": \"lab 301\"\n}",
+              "raw": "{\n  \"player_id\": {{mateId}},\n  \"type\": \"barricade_room\",\n  \"room_id\": 2\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1425,10 +1472,10 @@
       ]
     },
     {
-      "name": "6. A reward crossing into the Player Service",
+      "name": "6. A reward crossing into the Player and Resource Services",
       "item": [
         {
-          "name": "Create a player for the reward test",
+          "name": "Register a player for the reward test",
           "request": {
             "method": "POST",
             "header": [
@@ -1437,10 +1484,10 @@
                 "value": "application/json"
               }
             ],
-            "url": "{{gatewayUrl}}/players",
+            "url": "{{gatewayUrl}}/auth/register",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"reward_{{run}}\"\n}",
+              "raw": "{\n  \"username\": \"reward_{{run}}\",\n  \"password\": \"{{password}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1476,7 +1523,7 @@
             "url": "{{gatewayUrl}}/game/sessions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"reward {{run}}\",\n  \"host_player_id\": \"{{rewardPlayerId}}\"\n}",
+              "raw": "{\n  \"name\": \"reward {{run}}\",\n  \"host_player_id\": {{rewardPlayerId}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1512,7 +1559,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{rewardSessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{rewardPlayerId}}\",\n  \"type\": \"scavenge_canteen\"\n}",
+              "raw": "{\n  \"player_id\": {{rewardPlayerId}},\n  \"type\": \"scavenge\",\n  \"room_id\": 3\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1578,7 +1625,7 @@
                   "    pm.test(\"it reached 100%\", function () {",
                   "        pm.expect(body.percent).to.eql(100);",
                   "    });",
-                  "    pm.test(\"the reward reached the Player Service\", function () {",
+                  "    pm.test(\"the XP reached the Player Service\", function () {",
                   "        pm.expect(body.reward_synced, body.reward_error || \"no error\").to.be.true;",
                   "    });",
                   "}"
@@ -1613,28 +1660,50 @@
           ]
         },
         {
-          "name": "The coffee landed too",
+          "name": "The resources landed in the Resource Service",
           "request": {
             "method": "GET",
-            "header": [],
-            "url": "{{gatewayUrl}}/players/{{rewardPlayerId}}/inventory"
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/resources/players/{{rewardPlayerId}}",
+            "description": "Room 3 has a metal node. The Resource Service credits 5 to 15 metal when it receives game.action_completed, on top of the 4 every player starts with. Read as a service, because a player may only read their own balances."
           },
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Give the event a moment to arrive before asking.",
+                  "const until = Date.now() + 500;",
+                  "while (Date.now() < until) { /* deliberate busy wait */ }"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 200\", function () {",
-                  "    pm.response.to.have.status(200);",
-                  "});",
-                  "const coffee = pm.response.json().find(function (line) {",
-                  "    return line.item_code === \"coffee\";",
-                  "});",
-                  "pm.test(\"the inventory holds the coffee it found\", function () {",
-                  "    pm.expect(coffee, \"no coffee line\").to.not.be.undefined;",
-                  "    pm.expect(coffee.quantity).to.eql(1);",
-                  "});"
+                  "const body = pm.response.json();",
+                  "const polls = Number(pm.collectionVariables.get(\"polls\") || 0);",
+                  "",
+                  "// The event travels asynchronously, so poll until the metal shows up.",
+                  "if (pm.response.code === 200 && body.balances.metal <= 4 && polls < 60) {",
+                  "    pm.collectionVariables.set(\"polls\", polls + 1);",
+                  "    postman.setNextRequest(\"The resources landed in the Resource Service\");",
+                  "} else {",
+                  "    pm.test(\"status is 200\", function () {",
+                  "        pm.response.to.have.status(200);",
+                  "    });",
+                  "    pm.test(\"scavenging room 3 added metal\", function () {",
+                  "        pm.expect(body.balances.metal).to.be.above(4);",
+                  "    });",
+                  "}"
                 ]
               }
             }
@@ -1663,7 +1732,7 @@
           ]
         }
       ],
-      "description": "Its own session and player, with the action started immediately. A day lasts ten seconds at DEMO_SPEEDUP=60, so a session left sitting around is already at night, where a zombie changes the very XP this asserts on."
+      "description": "A completed action pays XP into the Player Service and publishes game.action_completed; the Resource Service reads that event and credits what was gathered."
     },
     {
       "name": "7. Day, night and zombies",
@@ -2031,7 +2100,7 @@
             "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}/actions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"player_id\": \"{{mateId}}\",\n  \"type\": \"repair_base\"\n}",
+              "raw": "{\n  \"player_id\": {{mateId}},\n  \"type\": \"repair_base\",\n  \"room_id\": 1\n}",
               "options": {
                 "raw": {
                   "language": "json"
