@@ -11,6 +11,10 @@ services:
     image: game_service:local
     build: ./services/game_service
 
+  game-2:
+    image: game_service:local
+    build: ./services/game_service
+
   gateway:
     image: gateway_service:local
     build: ./services/gateway_service
