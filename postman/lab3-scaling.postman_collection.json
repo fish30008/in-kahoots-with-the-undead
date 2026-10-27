@@ -1,0 +1,1054 @@
+{
+  "info": {
+    "name": "Lab 3: scaling up",
+    "description": "Service Discovery, round-robin load balancing, the circuit breaker, health checks with alerts, and the expiry of dead instances. Run it against the stack built from source:\n\n    docker compose -f compose.yml -f compose.local.yml up -d --build\n\nor the published images once they are tag 3. Folders 4 and 5 need the Collection Runner (folder 4 repeats a request; folder 5 waits about a minute).\n\nNot covered here, because they need a container stopped or killed: see lab3-tests.ps1 (Test-GatewayBreaker, Test-GameBreaker, Test-Expiry, Test-HealthUnhealthy) and the cross-instance WebSocket events (Test-GameEvents).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "1. Health and load of every component",
+      "description": "Grade 3 and 8: every service answers /health, with its load (`in_flight`, `max_concurrent`, `refused`). The Player copies have no host port; their health is read from the Service Discovery.",
+      "item": [
+        {
+          "name": "Gateway health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('it is the gateway', () => pm.expect(pm.response.json().service).to.eql('gateway'));",
+                  "pm.test('reports its load', () => {",
+                  "    const body = pm.response.json();",
+                  "    ['in_flight', 'max_concurrent', 'refused'].forEach(k => pm.expect(body, k).to.have.property(k));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Service Discovery health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('it is the discovery service', () => pm.expect(pm.response.json().service).to.eql('discovery-service'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{discoveryUrl}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Game copy 1 health (:8082)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('database ok', () => pm.expect(pm.response.json().database).to.eql('ok'));",
+                  "pm.test('reports its load', () => {",
+                  "    const body = pm.response.json();",
+                  "    ['in_flight', 'max_concurrent', 'refused'].forEach(k => pm.expect(body, k).to.have.property(k));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gameUrl}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Game copy 2 health (:8083)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('database ok', () => pm.expect(pm.response.json().database).to.eql('ok'));",
+                  "pm.test('reports its load', () => {",
+                  "    const body = pm.response.json();",
+                  "    ['in_flight', 'max_concurrent', 'refused'].forEach(k => pm.expect(body, k).to.have.property(k));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{game2Url}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Player copies' health, via the Service Discovery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const players = pm.response.json().player || [];",
+                  "pm.test('at least one Player copy is registered', () => pm.expect(players.length).to.be.above(0));",
+                  "pm.test('every checked Player copy is ok', () => {",
+                  "    players.filter(p => p.state !== 'not checked yet')",
+                  "        .forEach(p => pm.expect(p.state, p.url + ': ' + p.detail).to.eql('ok'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services/health",
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "The Player Service runs as several copies with no port on the host, so its /health cannot be called directly. The Service Discovery checks every copy every 10 seconds; this returns the latest result of each."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Service Discovery",
+      "description": "Grade 4: the registry. Every call except /health needs `X-Internal-Key`. The demo instance `postman-demo` is registered and removed again; no service uses that name.",
+      "item": [
+        {
+          "name": "List without the key: 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 without X-Internal-Key', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{discoveryUrl}}/services",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "List every running instance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const list = pm.response.json();",
+                  "pm.test('two or more Player copies', () => pm.expect((list.player || []).length).to.be.at.least(2));",
+                  "pm.test('two Game copies', () => pm.expect((list.game || []).length).to.be.at.least(2));",
+                  "pm.test('two public Game addresses for browsers', () => pm.expect((list['game-public'] || []).length).to.be.at.least(2));",
+                  "pm.test('the gateway registered itself', () => pm.expect((list.gateway || []).length).to.eql(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Health of every instance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const all = pm.response.json();",
+                  "pm.test('every instance has a state and a detail', () => {",
+                  "    Object.values(all).flat().forEach(i => {",
+                  "        pm.expect(i).to.have.property('state');",
+                  "        pm.expect(i).to.have.property('detail');",
+                  "    });",
+                  "});",
+                  "pm.test('browser addresses are not checked', () => {",
+                  "    (all['game-public'] || []).forEach(i => pm.expect(i.state).to.eql('not checked'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services/health",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Register: URL without http(s): 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 for a URL without http:// or https://', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"postman-demo\",\n  \"url\": \"localhost:9999\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Register: empty name: 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 for an empty name', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"\",\n  \"url\": \"http://demo:9999\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Register a demo instance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('trailing slash dropped', () => pm.expect(pm.response.json().url).to.eql('http://postman-demo:9999'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"postman-demo\",\n  \"url\": \"http://postman-demo:9999/\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Register it again: still one entry",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK: registering twice is harmless', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"postman-demo\",\n  \"url\": \"http://postman-demo:9999\"\n}"
+            }
+          }
+        },
+        {
+          "name": "It is listed once",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('listed exactly once', () => pm.expect(pm.response.json()['postman-demo']).to.eql(['http://postman-demo:9999']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Deregister it, with a reason",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/deregister",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"postman-demo\",\n  \"url\": \"http://postman-demo:9999\",\n  \"reason\": \"removed by the Postman collection\"\n}"
+            },
+            "description": "The reason is written to the discovery log: `removed postman-demo at ... : removed by the Postman collection`."
+          }
+        },
+        {
+          "name": "Deregister it again: 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404: it is not registered any more', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/deregister",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"postman-demo\",\n  \"url\": \"http://postman-demo:9999\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Load balancing: round robin",
+      "description": "Grade 5 and 6. Every gateway response carries `X-Upstream-Instance`: the copy that answered. Four logins in a row must not all land on the same Player copy, and GET /ws/game hands out the two Game copies in turn.",
+      "item": [
+        {
+          "name": "Register a player",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('username', 'lab3_' + String(Date.now()).slice(-8));",
+                  "pm.collectionVariables.set('upstreams', '[]');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Log in (1/4)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('logged in', () => pm.response.to.have.status(200));",
+                  "const upstream = pm.response.headers.get('X-Upstream-Instance');",
+                  "pm.test('the gateway names the copy that answered', () => pm.expect(upstream).to.match(/^http:\\/\\//));",
+                  "const seen = JSON.parse(pm.collectionVariables.get('upstreams') || '[]');",
+                  "seen.push(upstream);",
+                  "pm.collectionVariables.set('upstreams', JSON.stringify(seen));",
+                  "console.log('answered by', upstream);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Log in (2/4)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('logged in', () => pm.response.to.have.status(200));",
+                  "const upstream = pm.response.headers.get('X-Upstream-Instance');",
+                  "pm.test('the gateway names the copy that answered', () => pm.expect(upstream).to.match(/^http:\\/\\//));",
+                  "const seen = JSON.parse(pm.collectionVariables.get('upstreams') || '[]');",
+                  "seen.push(upstream);",
+                  "pm.collectionVariables.set('upstreams', JSON.stringify(seen));",
+                  "console.log('answered by', upstream);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Log in (3/4)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('logged in', () => pm.response.to.have.status(200));",
+                  "const upstream = pm.response.headers.get('X-Upstream-Instance');",
+                  "pm.test('the gateway names the copy that answered', () => pm.expect(upstream).to.match(/^http:\\/\\//));",
+                  "const seen = JSON.parse(pm.collectionVariables.get('upstreams') || '[]');",
+                  "seen.push(upstream);",
+                  "pm.collectionVariables.set('upstreams', JSON.stringify(seen));",
+                  "console.log('answered by', upstream);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Log in (4/4)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('logged in', () => pm.response.to.have.status(200));",
+                  "const upstream = pm.response.headers.get('X-Upstream-Instance');",
+                  "pm.test('the gateway names the copy that answered', () => pm.expect(upstream).to.match(/^http:\\/\\//));",
+                  "const seen = JSON.parse(pm.collectionVariables.get('upstreams') || '[]');",
+                  "seen.push(upstream);",
+                  "pm.collectionVariables.set('upstreams', JSON.stringify(seen));",
+                  "console.log('answered by', upstream);",
+                  "if (seen.length >= 4) {",
+                  "    pm.test('the logins were spread over more than one Player copy', () =>",
+                  "        pm.expect(new Set(seen).size).to.be.above(1));",
+                  "    pm.collectionVariables.set('token', pm.response.json().access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "WebSocket address, first time",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('wsFirst', pm.response.json().url);",
+                  "console.log('first', pm.response.json().url);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/ws/game"
+          }
+        },
+        {
+          "name": "WebSocket address, second time: the other Game copy",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const url = pm.response.json().url;",
+                  "console.log('second', url);",
+                  "pm.test('a different Game copy than the first time', () => pm.expect(url).to.not.eql(pm.collectionVariables.get('wsFirst')));",
+                  "pm.test('a browser address', () => pm.expect(url).to.match(/^ws:\\/\\/localhost:\\d+\\/game$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gatewayUrl}}/ws/game"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Circuit breaker removes a failing copy",
+      "description": "Grade 7 and 10, without stopping any container. A fake Player copy is registered at an address nobody listens on. The gateway adds it to the rotation, forwards every n-th login to it, gets 503, and after 3 failures within TASK_TIMEOUT x 3.5 its breaker trips and removes the copy, from its rotation and from the Service Discovery.\n\nRun this folder with the Collection Runner: the login request repeats itself until the fake copy is gone.",
+      "item": [
+        {
+          "name": "Register a fake Player copy that cannot answer",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('breakerTries', '0');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"player\",\n  \"url\": \"{{fakeUrl}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Log in until the breaker removes it",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// the first time, give the gateway one refresh (5 s) to pick up the fake copy",
+                  "if (pm.collectionVariables.get('breakerTries') === '0') { setTimeout(() => {}, 6000); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const tries = Number(pm.collectionVariables.get('breakerTries')) + 1;",
+                  "pm.collectionVariables.set('breakerTries', String(tries));",
+                  "const upstream = pm.response.headers.get('X-Upstream-Instance');",
+                  "console.log(`try ${tries}: ${pm.response.code} from ${upstream}`);",
+                  "pm.test('a live copy answers 200, the fake one 503', () => pm.expect(pm.response.code).to.be.oneOf([200, 503]));",
+                  "if (pm.response.code === 503) {",
+                  "    pm.test('the 503 came from the fake copy', () => pm.expect(upstream).to.eql(pm.collectionVariables.get('fakeUrl')));",
+                  "}",
+                  "// 3 failures are needed; with 3 copies in rotation that is about 9 logins",
+                  "if (tries < 12) {",
+                  "    pm.sendRequest({",
+                  "        url: pm.collectionVariables.get('discoveryUrl') + '/services',",
+                  "        header: { 'X-Internal-Key': pm.collectionVariables.get('internalKey') }",
+                  "    }, (err, res) => {",
+                  "        const players = (res && res.json().player) || [];",
+                  "        if (players.includes(pm.collectionVariables.get('fakeUrl'))) {",
+                  "            pm.execution.setNextRequest('Log in until the breaker removes it');",
+                  "        }",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "The fake copy is gone from the registry",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const players = pm.response.json().player || [];",
+                  "pm.test('the breaker removed the fake copy', () => pm.expect(players).to.not.include(pm.collectionVariables.get('fakeUrl')));",
+                  "pm.test('the real Player copies are still there', () => pm.expect(players.length).to.be.at.least(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services",
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "The gateway log shows `circuit breaker TRIPPED ... removing it`, and the discovery log `removed player at http://127.0.0.1:9 ...: circuit breaker tripped in the gateway`."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Health alerts and expiry (slow: about a minute)",
+      "description": "Grade 8 and 9, plus the expiry of instances that stop renewing. An instance named `postman-unreachable` is registered at an address nobody listens on and never renewed. The next health round marks it `unhealthy` and raises an ALERT, in the log and on Telegram; 45 s without a renewal later it is dropped (REMOVED on Telegram).",
+      "item": [
+        {
+          "name": "Register an instance that is down",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{discoveryUrl}}/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"postman-unreachable\",\n  \"url\": \"{{fakeUrl}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "After one health round it is unhealthy",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// a health round runs every 10 s",
+                  "setTimeout(() => {}, 12000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const entry = (pm.response.json()['postman-unreachable'] || [])[0];",
+                  "pm.test('it is listed', () => pm.expect(entry).to.be.an('object'));",
+                  "pm.test('its state is unhealthy', () => pm.expect(entry.state).to.eql('unhealthy'));",
+                  "console.log(entry && entry.detail);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services/health",
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "An ALERT line appears in the discovery log, and the same message on Telegram."
+          }
+        },
+        {
+          "name": "Without renewals it is dropped",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// dropped 45 s after its registration, on the next 10 s round",
+                  "setTimeout(() => {}, 50000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('it is gone', () => pm.expect(pm.response.json()).to.not.have.property('postman-unreachable'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services",
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "The discovery log shows `removed postman-unreachable at ...: no renewal for ...s`, and Telegram a REMOVED message."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "gatewayUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "discoveryUrl",
+      "value": "http://localhost:8090"
+    },
+    {
+      "key": "gameUrl",
+      "value": "http://localhost:8082"
+    },
+    {
+      "key": "game2Url",
+      "value": "http://localhost:8083"
+    },
+    {
+      "key": "internalKey",
+      "value": "changeme"
+    },
+    {
+      "key": "password",
+      "value": "hunter2hunter2"
+    },
+    {
+      "key": "fakeUrl",
+      "value": "http://127.0.0.1:9",
+      "description": "an address where nothing listens"
+    },
+    {
+      "key": "username",
+      "value": ""
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "upstreams",
+      "value": "[]"
+    },
+    {
+      "key": "wsFirst",
+      "value": ""
+    },
+    {
+      "key": "breakerTries",
+      "value": "0"
+    }
+  ]
+}

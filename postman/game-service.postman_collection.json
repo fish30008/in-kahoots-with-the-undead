@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Game Service",
-    "description": "Game Service, run through the Gateway.\n\nRun the whole collection in order: it registers a player and logs in, creates its other players in the Player Service, plays a session through a timed action and a night of zombies, and checks that the results reached the Player Service.\n\nThree things to know before running it:\n\n1. The Gateway and both services must be up. The Game Service calls the Player Service synchronously, through the Gateway, so without them a session cannot even be created.\n2. The Gateway runs with AUTH_MODE=secret and the same JWT_SECRET as the Player Service, and the same INTERNAL_KEY as the Game Service.\n3. Start the Game Service with DEMO_SPEEDUP=60. Actions really do take 5 to 10 minutes otherwise, and the polling requests here would sit there for all of it.\n\n{{gatewayUrl}} takes every request, with Authorization: Bearer {{token}} set by the Log in request. {{gameUrl}} and {{playerUrl}} are the services themselves, used only for their /health, which the Gateway does not forward.\n\nHeadless:\n\n    npx newman run postman/game-service.postman_collection.json\n\nUsernames carry a per-run id, so it can be run repeatedly without cleaning the database.\n\nWebSockets are not covered here beyond asking the Gateway for the URL: newman cannot hold a socket open. Use go run ./scripts/wswatch 'ws://localhost:8082/game?session_id=<id>' for that.",
+    "description": "Game Service, run through the Gateway.\n\nRun the whole collection in order: it registers a player and logs in, creates its other players in the Player Service, plays a session through a timed action and a night of zombies, and checks that the results reached the Player Service.\n\nThree things to know before running it:\n\n1. The Gateway and both services must be up. The Game Service calls the Player Service synchronously, through the Gateway, so without them a session cannot even be created.\n2. The Gateway runs with AUTH_MODE=secret and the same JWT_SECRET as the Player Service, and the same INTERNAL_KEY as the Game Service.\n3. Start the Game Service with DEMO_SPEEDUP=60. Actions really do take 5 to 10 minutes otherwise, and the polling requests here would sit there for all of it.\n\n{{gatewayUrl}} takes every request, with Authorization: Bearer {{token}} set by the Log in request. {{gameUrl}} is the Game Service itself, used only for its /health, which the Gateway does not forward. The Player Service runs as several copies with no host port, so its health is read from the Service Discovery at {{discoveryUrl}}.\n\nHeadless:\n\n    npx newman run postman/game-service.postman_collection.json\n\nUsernames carry a per-run id, so it can be run repeatedly without cleaning the database.\n\nWebSockets are not covered here beyond asking the Gateway for the URL: newman cannot hold a socket open. Use go run ./scripts/wswatch 'ws://localhost:8082/game?session_id=<id>' for that.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -11,14 +11,13 @@
       "description": "The Gateway: every request except the two service health checks."
     },
     {
+      "key": "discoveryUrl",
+      "value": "http://localhost:8090"
+    },
+    {
       "key": "gameUrl",
       "value": "http://localhost:8082",
       "description": "The Game Service itself, for its health check only."
-    },
-    {
-      "key": "playerUrl",
-      "value": "http://localhost:8081",
-      "description": "The Player Service itself, for its health check only."
     },
     {
       "key": "password",
@@ -80,32 +79,38 @@
           ]
         },
         {
-          "name": "Player Service health",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": "{{playerUrl}}/health",
-            "description": "The Game Service owns no player data. Without this service running, creating a session answers 502.",
-            "auth": {
-              "type": "noauth"
-            }
-          },
+          "name": "Player copies' health, via the Service Discovery",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 200\", function () {",
-                  "    pm.response.to.have.status(200);",
-                  "});",
-                  "pm.test(\"the Player Service is up, which the Game Service needs\", function () {",
-                  "    pm.expect(pm.response.json().status).to.eql(\"ok\");",
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const players = pm.response.json().player || [];",
+                  "pm.test('at least one Player copy is registered', () => pm.expect(players.length).to.be.above(0));",
+                  "pm.test('every checked Player copy is ok', () => {",
+                  "    players.filter(p => p.state !== 'not checked yet')",
+                  "        .forEach(p => pm.expect(p.state, p.url + ': ' + p.detail).to.eql('ok'));",
                   "});"
                 ]
               }
             }
-          ]
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services/health",
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "The Player Service runs as several copies with no port on the host, so its /health cannot be called directly. The Service Discovery checks every copy every 10 seconds; this returns the latest result of each."
+          }
         },
         {
           "name": "Gateway health",

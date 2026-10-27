@@ -15,7 +15,7 @@ services:
       retries: 10
 
   player:
-    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-2}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-3}
     restart: unless-stopped
     environment:
       PORT: ${PLAYER_PORT:-8081}
@@ -62,7 +62,7 @@ services:
   # with replicas because the browser connects to each directly, so each needs
   # its own port on the host; game-2 copies everything else from game.
   game: &game
-    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-2}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-3}
     restart: unless-stopped
     environment: &game-env
       PORT: ${GAME_PORT:-8082}
@@ -328,7 +328,7 @@ services:
 
   gateway:
     # The single point of entry: http://localhost:8080.
-    image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-2}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-3}
     restart: unless-stopped
     environment:
       PLAYER_SERVICE_URL: http://player:${PLAYER_PORT:-8081}

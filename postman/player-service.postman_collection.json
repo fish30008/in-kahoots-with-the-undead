@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Player Service",
-    "description": "Happy-path collection for the Player Service, run through the Gateway. Run the whole collection from top to bottom (Postman Runner): a player registers and logs in, an item is added to the catalog, granted and consumed, then the players are deleted. IDs, codes and the access token are passed between requests through collection variables, so the collection can be re-run as many times as you want.\n\n{{baseUrl}} is the Gateway (default http://localhost:8080): it checks the token, removes it, and forwards /auth and /players to the Player Service. Every request sends Authorization: Bearer {{token}}, set by the Log in request; register and login need none. The Gateway must run with AUTH_MODE=secret and the same JWT_SECRET as the Player Service.\n\n{{playerUrl}} is the Player Service itself (default http://localhost:8081), used only for its /health, which the Gateway does not forward.",
+    "description": "Happy-path collection for the Player Service, run through the Gateway. Run the whole collection from top to bottom (Postman Runner): a player registers and logs in, an item is added to the catalog, granted and consumed, then the players are deleted. IDs, codes and the access token are passed between requests through collection variables, so the collection can be re-run as many times as you want.\n\n{{baseUrl}} is the Gateway (default http://localhost:8080): it checks the token, removes it, and forwards /auth and /players to the Player Service. Every request sends Authorization: Bearer {{token}}, set by the Log in request; register and login need none. The Gateway must run with AUTH_MODE=secret and the same JWT_SECRET as the Player Service.\n\nThe Player Service runs as several copies with no host port, so its health is read from the Service Discovery at {{discoveryUrl}} (default http://localhost:8090), with {{internalKey}}.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -11,9 +11,8 @@
       "description": "The Gateway."
     },
     {
-      "key": "playerUrl",
-      "value": "http://localhost:8081",
-      "description": "The Player Service itself, for its health check only."
+      "key": "discoveryUrl",
+      "value": "http://localhost:8090"
     },
     {
       "key": "password",
@@ -42,6 +41,10 @@
     {
       "key": "itemCode",
       "value": ""
+    },
+    {
+      "key": "internalKey",
+      "value": "changeme"
     }
   ],
   "item": [
@@ -49,7 +52,7 @@
       "name": "Health",
       "item": [
         {
-          "name": "Health check",
+          "name": "Player copies' health, via the Service Discovery",
           "event": [
             {
               "listen": "test",
@@ -57,10 +60,11 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "pm.test('service and database are up', () => {",
-                  "    const body = pm.response.json();",
-                  "    pm.expect(body.status).to.eql('ok');",
-                  "    pm.expect(body.database).to.eql('ok');",
+                  "const players = pm.response.json().player || [];",
+                  "pm.test('at least one Player copy is registered', () => pm.expect(players.length).to.be.above(0));",
+                  "pm.test('every checked Player copy is ok', () => {",
+                  "    players.filter(p => p.state !== 'not checked yet')",
+                  "        .forEach(p => pm.expect(p.state, p.url + ': ' + p.detail).to.eql('ok'));",
                   "});"
                 ]
               }
@@ -68,12 +72,17 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": "{{playerUrl}}/health",
-            "description": "Confirms the service is running and can reach PostgreSQL.",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services/health",
             "auth": {
               "type": "noauth"
-            }
+            },
+            "description": "The Player Service runs as several copies with no port on the host, so its /health cannot be called directly. The Service Discovery checks every copy every 10 seconds; this returns the latest result of each."
           }
         },
         {
