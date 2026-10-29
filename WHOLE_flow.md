@@ -5,6 +5,7 @@ service. It covers the core logic of every part added in Lab 3, with the code
 that implements it. Snippets are taken from the services as they are on `main`;
 `...` marks a cut.
 
+- [What the Service Discovery is for](#what-the-service-discovery-is-for)
 - [1. The picture](#1-the-picture)
 - [2. Where each grade lives](#2-where-each-grade-lives)
 - [3. The life of one instance](#3-the-life-of-one-instance)
@@ -20,6 +21,31 @@ that implements it. Snippets are taken from the services as they are on `main`;
 - [13. Three requests, end to end](#13-three-requests-end-to-end)
 - [14. Configuration](#14-configuration)
 - [15. Known limits](#15-known-limits)
+- [16. Every file and what it does](#16-every-file-and-what-it-does)
+
+---
+
+## What the Service Discovery is for
+
+Keeping the list of living copies is the core of it, and everything else it does is built on that list. It has four jobs:
+
+| Job | What it does | Without it |
+| --- | --- | --- |
+| **Phone book** | Knows which copies of each service are running and where: `GET /services`. The Gateway's only source of addresses for load balancing. | The Gateway would need every address written in its config, and could not see a third copy being started. |
+| **Doctor** | Every 10 s it calls every copy's `/health` and keeps the result: `ok`, `critical` or `unhealthy` (`GET /services/health`). | Nobody would notice a copy that is overloaded or has lost its database. |
+| **Alarm** | When a copy's state changes it logs an `ALERT` (or `RESOLVED`) and sends it to Telegram. | The developers would find out from users. |
+| **Cleaner** | A copy that stops renewing its registration for 45 s is dropped from the list (`REMOVED`). | A crashed copy would stay on the list for good, and keep getting requests. |
+
+What it does **not** do, so the roles stay clear:
+
+| Not its job | Whose job |
+| --- | --- |
+| forwarding requests, choosing a copy (round robin) | the Gateway (`gateway_service/app/discovery.py`, `pick()`) |
+| removing a copy whose requests keep failing (circuit breaker) | the Gateway (`app/breaker.py`), which then tells Discovery |
+| starting, stopping or restarting containers | Docker / Compose |
+| storing anything permanently | nobody: the list is in memory, and renewals rebuild it after a restart |
+
+In one sentence: **the services tell Discovery they exist, the Gateway asks Discovery whom to send traffic to, and Discovery watches everyone and raises the alarm.**
 
 ---
 
@@ -132,6 +158,7 @@ service runs as **one** process: a second worker would hold a different dict.
 | `POST` | `/register` | `{"name", "url"}` | adds the instance; a repeat is a no-op |
 | `POST` | `/deregister` | `{"name", "url"}` | removes it; `404` if unknown |
 | `GET` | `/services` | | `{"player": [...], "game": [...], ...}` |
+| `GET` | `/services/health` | | every instance with its last health check ([§10](#10-health-checks-and-load)) |
 | `GET` | `/health` | | always open |
 
 Everything except `/health` needs `X-Internal-Key`:
@@ -1088,3 +1115,85 @@ docker compose -f compose.yml -f compose.local.yml up -d --build
 - **Discovery is a single process with an in-memory list.** Renewal rebuilds the list after a restart, but while Discovery is down the Gateway routes on its last known list, and nothing new can join.
 - **Round robin ignores load.** Requests are spread evenly, whatever each copy is doing. Health checks report load; they do not steer traffic.
 - **Teammates' services do not register.** They are reached at fixed URLs, are not health-checked, and are not balanced.
+
+---
+
+## 16. Every file and what it does
+
+One or two lines per file, with its main functions. Every service also has a `Dockerfile` (how its image is built), a `docker-compose.yml` to run it on its own, a `.env.example` listing its settings, a `README.md`, and `.github/workflows/docker-publish.yml` (CI: build on push to `main`, publish to Docker Hub on a lab-number tag).
+
+### Integration repo (`in-kahoots-with-the-undead`)
+
+| File | What it does |
+| --- | --- |
+| `compose.yml` | The whole stack from Docker Hub images: 2 Player copies (`replicas`), `game` + `game-2`, discovery, gateway, the teammates' services, their databases and the client. |
+| `compose.local.yml` | Override that builds our four services from the submodule source instead of pulling images: `docker compose -f compose.yml -f compose.local.yml up -d --build`. |
+| `.env` (not committed) | Real settings: `JWT_SECRET`, `INTERNAL_KEY`, image tags, the Telegram bot token and chat id. |
+| `db/<service>/init.sql` | Seed data mounted into the teammates' databases (exam, world, zombie, resource). |
+| `postman/lab3-scaling.postman_collection.json` | Lab 3 checks: health and load, discovery, round robin, the breaker removing a fake copy, alerts and expiry. |
+| `postman/player-service…`, `postman/game-service…` | The Player and Game API collections, run through the Gateway. |
+| `lab3-tests.ps1` (not committed) | PowerShell tests that need containers stopped or killed: `Test-GatewayBreaker`, `Test-Expiry`, `Test-GameEvents`, … |
+| `flow.md`, `communication.md`, `architecture.mmd` | How Gateway, Player and Game interact; the cross-team API contract; the source of the architecture diagram. |
+
+### Service Discovery (`services/service_discovery`, Python)
+
+| File | What it does |
+| --- | --- |
+| `app/main.py` | The whole service. Endpoints `register`, `deregister`, `services`, `services_health`, `health`; the background loop `watch_health()` runs `expire()` (drop copies that stopped renewing) and `check_all()` (every copy's `/health`, via `check()`) every 10 s. |
+| | `alert()` / `notify()` log an alert and send it to Telegram; `require_key()` checks `X-Internal-Key`; `lifespan()` starts and stops the background loop. |
+
+### Gateway (`services/gateway_service`, Python)
+
+| File | What it does |
+| --- | --- |
+| `app/main.py` | Creates the app: `lifespan()` opens the HTTP client, reads the registry once, starts `discovery.watch()`, and deregisters on shutdown; `auth_error()` turns auth failures into `401`/`403`. |
+| `app/config.py` | `Settings` (all env variables), `SERVICES` (fixed fallback URL per service), `ROUTES` (first path segment → service), `EVENT_PRODUCERS`. |
+| `app/discovery.py` | The Gateway's copy of the registry: `refresh()` reads it every 5 s, `pick()` chooses the next copy (round robin), `watch()` also registers the Gateway itself. |
+| | `remove()` / `deregister()` take a failing copy out of rotation and out of Discovery; `post()` sends register/deregister calls. |
+| `app/breaker.py` | `failure()` counts failed forwards per copy; the 3rd within `TASK_TIMEOUT × 3.5` trips the breaker and calls `discovery.remove()`. |
+| `app/routers/proxy.py` | `proxy()`: every REST request: route by first segment, `pick()` a copy, forward, count `5xx`/timeouts in the breaker, add `X-Upstream-Instance`; `reject_ws()` refuses relaying WebSockets. |
+| `app/proxy.py` | `forward_http()` sends the request on: drops `Authorization` and the login cookie (`strip_login_cookie()`), adds `X-Player-Id`; `503`/`504` when the copy is unreachable or slow. |
+| `app/routers/ws.py` | `negotiate()`: `GET /ws/{service}` hands back a WebSocket address: a Game copy for browsers (in turn), a producer's `/events` for services; `to_ws()` turns `http` into `ws`. |
+| `app/auth.py` | `authorize()` decides who is calling: `read_token()` + `verify_token()` (HS256 JWT from Player) or `is_internal()` (`X-Internal-Key`); returns a `Caller`, raises `AuthError`. |
+| `app/limits.py` | `TaskLimits` middleware: at most `MAX_CONCURRENT_TASKS` at once (`429`), at most `TASK_TIMEOUT` each (`504`); keeps the `load` counters shown on `/health`. |
+| `app/routers/health.py` | `health()`: `/health` with the Gateway's load (`in_flight`, `max_concurrent`, `refused`). |
+| `app/errors.py` | `error()`: the Gateway's error body `{"error": {"code", "message"}}`. |
+
+### Player Service (`services/player_service`, Go)
+
+| File | What it does |
+| --- | --- |
+| `cmd/api/main.go` | `main()`: config, database + schema, outbox cleaner, HTTP server, `Register` with Discovery (renewed every 15 s), and on SIGTERM `Deregister` then shut down. |
+| `cmd/api/router.go` | `newRouter()`: all routes, `/health` with the load, `/events`, and the task limits around everything else. |
+| `internal/config/config.go` | `Load()` reads the environment (`env()`, `envInt()`); builds `ServiceURL` from the hostname so each copy registers its own address. |
+| `internal/discovery/discovery.go` | `Register()` announces the copy and renews it every 15 s (retry every 5 s); `Deregister()` on shutdown, with a reason; `post()` does the HTTP call. |
+| `internal/database/database.go` + `schema.sql` | `Connect()` retries until Postgres answers; `Migrate()` applies `schema.sql` behind an advisory lock, so copies starting together don't collide. |
+| `internal/api/limits.go` | `Limit()` caps concurrent requests (`429`) and counts `inFlight`/`refused`; `Load()` returns them for `/health`; `Timeout()` gives every request a deadline (`408`). |
+| `internal/api/api.go`, `params.go` | Shared helpers: `JSON()`, `Error()`, `Decode()`, `Internal()`, `IsUniqueViolation()`; `PathID()`, `QueryInt()` read URL parameters. |
+| `internal/auth/handler.go`, `token.go` | `POST /auth/register` and `/auth/login` (`register()`, `login()`); `NewToken()` signs the HS256 JWT the Gateway verifies. |
+| `internal/player/handler.go`, `store.go`, `player.go` | Players: `list`, `get`, `update`, `delete`, `addXP`, `setPresence`; the store does the SQL; `LevelForXP()` is the level rule. |
+| `internal/inventory/handler.go`, `store.go`, `inventory.go` | Item catalog (`createItem`, `listItems`), a player's items (`list`, `addItems`, `consume`) and trades (`trade` → `Transfer()` in one transaction). |
+| `internal/events/events.go` | Outbox: `Add()` writes an event in the same transaction as the change; `Stream()` serves `GET /events` to other services; `Clean()` deletes old ones. |
+
+### Game Service (`services/game_service`, Go)
+
+| File | What it does |
+| --- | --- |
+| `cmd/api/main.go` | `main()`: config, database, clients with breakers, hub + `Listen()`, engine, HTTP server; registers as `game` and `game-public`, deregisters both on shutdown. |
+| `cmd/api/router.go` | `newRouter()`: sessions, actions, zombies, `/events`, the `/game` WebSocket, `/health` with the load, and the task limits. |
+| `internal/config/config.go` | `Load()` reads the environment, including `PUBLIC_URL`; `Scale()` shortens durations by `DEMO_SPEEDUP`. |
+| `internal/discovery/discovery.go` | Same as Player's: `Register()` + renewal every 15 s, `Deregister()` with a reason. |
+| `internal/database/database.go` + `schema.sql` | Same as Player's: `Connect()`, and `Migrate()` behind an advisory lock. |
+| `internal/engine/engine.go` | The game clock: `Run()` ticks every second; `tick()` sends progress everywhere, the rest only if `leading()`/`holdLock()` holds the Postgres lock. |
+| | Jobs: `advancePhases()`, `spawnZombies()`, `completeActions()` (+ `payReward()`), `resolveAttacks()` (`attack()`, `administerExam()`, `steal()`), `expireZombies()`. |
+| `internal/hub/hub.go` | Live events for players: `Serve()` holds a watcher's WebSocket; `Broadcast()` sends an event through Postgres `NOTIFY`, `Listen()` receives everyone's and `deliver()`s to local sockets. |
+| | `BroadcastLocal()` is for progress frames (this copy only); `HasSubscribers()` / `Idle()` let the engine skip work nobody watches. |
+| `internal/breaker/breaker.go` | `RoundTrip()` wraps every outgoing call: `fail()` counts failures, the 3rd within the window removes the target; `removed()` makes calls fail fast until the window ends. |
+| `internal/session/handler.go`, `store.go`, `session.go` | Sessions: `create`, `list`, `get`, `update` (phase / end), `delete`, `join`, `leave`, and `Watch()` (the WebSocket); `AdvanceDuePhases()` flips day and night. |
+| `internal/action/handler.go`, `store.go`, `action.go` | Timed actions: `start` (checks the room with World), `list`, `get`, `cancel`; `ClaimDue()` completes finished ones and writes `game.action_completed`. |
+| `internal/zombie/handler.go`, `store.go`, `zombie.go` | Zombies: `list`; the store spawns (`Spawn()`), claims attacks (`ClaimDueAttacks()`), records outcomes and expires them; `SpawnPlan()`, `AttackDelay()`. |
+| `internal/playerclient/client.go` | Calls Player through the Gateway: `Get()`, `AddXP()`, `SetPresence()`, `ConsumeItem()`, `Inventory()`; `do()` maps answers to errors. |
+| `internal/worldclient/client.go` | `Room()` asks World (through the Gateway) whether a room exists, is unlocked and has a resource. |
+| `internal/examclient/client.go` | Exams for the Professor Zombie: `New()` picks the `HTTP` client when `EXAM_SERVICE_URL` is set, otherwise the `Mock`; both have `Administer()`. |
+| `internal/outbox/outbox.go` | Same as Player's events: `Add()`, `Stream()` (`GET /events`), `Clean()`. |
+| `internal/api/limits.go`, `api.go`, `params.go` | Same as Player's: request limits + load counters, response helpers, and `PathUUID()` for session ids. |

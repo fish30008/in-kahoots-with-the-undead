@@ -45,6 +45,11 @@
     {
       "key": "internalKey",
       "value": "changeme"
+    },
+    {
+      "key": "invalidToken",
+      "value": "",
+      "description": "Set by the invalid-token request's pre-request script."
     }
   ],
   "item": [
@@ -125,7 +130,7 @@
               "bearer": [
                 {
                   "key": "token",
-                  "value": "not-a-real-token",
+                  "value": "{{invalidToken}}",
                   "type": "string"
                 }
               ]
@@ -133,6 +138,17 @@
             "description": "Sends a token the Gateway cannot verify. A request with no token at all is refused the same way, but Postman keeps the access_token cookie from an earlier login and would send it by itself, so an explicit bad token is what makes this check repeatable."
           },
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A token that cannot be valid, made here rather than written into the request,",
+                  "// so no token-looking value is stored in the collection.",
+                  "pm.collectionVariables.set('invalidToken', 'invalid-' + Date.now());"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
