@@ -1,8 +1,8 @@
 # How the system works
 
 A walk through one request, from the client to the database and back, for the
-three pieces that are ours: the **Gateway**, the **Player Service** and the
-**Game Service**. Each service has its own `flow.md` describing its code; this
+pieces that are ours: the **Gateway**, the **Message Broker**, the **Player
+Service** and the **Game Service**. Each service has its own `flow.md` describing its code; this
 file describes how they talk to each other.
 
 ---
@@ -19,16 +19,22 @@ file describes how they talk to each other.
                 |     Gateway      |       :
                 |  Python :8080    |       :
                 +------------------+       :
-                  |       ^      |         :
-     /auth        |       |      |  /game  :
-     /players     |       |      |         :
-     /trades      |       |      v         v
-                  v       |    +------------------+
+                         | /queues/<service>/...
+                         v                 :
+                +------------------+       :
+                |  Message Broker  |  queue per service, topics,
+                |  Python :8070    |  round robin, circuit breakers
+                +------------------+       :
+                  |   ^   ^      |         :
+     /auth        |   |   |      |  /game  :
+     /players     |   |   |      |         :
+     /trades      |   |   |      v         v
+                  v   |   |    +------------------+
         +----------------+|    |   Game Service   |
-        | Player Service |+----|   Go :8082       |
-        | Go :8081       | REST +------------------+
-        +----------------+ via            |
-                |          Gateway        |
+        | Player Service ||    |   Go :8082       |
+        | Go :8081       |+----+------------------+
+        +----------------+  REST and topics, via the broker
+                |                         |
                 v                         v
            player-db                   game-db
            (Postgres)                  (Postgres)
@@ -36,16 +42,18 @@ file describes how they talk to each other.
 
 Three rules hold the design together:
 
-1. **One door.** Every REST request goes to the Gateway on port 8080, whether it
-   comes from a client or from another service. Nobody calls a service directly.
+1. **One door for clients, one for services.** Every REST request from a client
+   goes to the Gateway on port 8080, which hands it to the Message Broker. Every
+   call between services, and every event, goes to the broker on port 8070.
+   Nobody calls a service directly.
 2. **Credentials stop at the door.** The Gateway checks the token. The services
    behind it never see it.
 3. **One database per service.** Game never reads Player's tables. When it needs
    a player, it asks over REST.
 
 Besides REST there are **events**: when something happens that another service
-reacts to, the service that owns it publishes an event on its own WebSocket and
-the others read it. Section 6 covers that.
+reacts to, the service that owns it publishes it to a broker topic (and on its own
+WebSocket, for the teammates' services). Section 6 covers that.
 
 ---
 
@@ -53,11 +61,13 @@ the others read it. Section 6 covers that.
 
 | Piece | Language | Port | Job |
 | --- | --- | --- | --- |
-| Gateway | Python, FastAPI | 8080 | Checks who is calling, picks the service, forwards the request, enforces limits. No database. |
+| Gateway | Python, FastAPI | 8080 | Checks who is calling, picks the service, puts the request on the broker's queue for it, enforces limits, serves `GET /logs`. No database. |
+| Message Broker | Python, standard library | 8070 | One queue per service, topics, round robin over the instances, circuit breakers, one thread per request. No database (yet). |
 | Player Service | Go, chi | 8081 | Accounts, login, XP and level, inventory, item catalog, trades. Issues the access token. Publishes `player.registered` and `player.leveled_up`. |
 | Game Service | Go, chi | 8082 | Sessions, actions, zombies, the day/night tick loop, the live WebSocket. Publishes `game.action_completed`. |
 
-The Gateway picks the service from the **first part of the path**:
+The Gateway (and, for calls between services, the broker) picks the service from
+the **first part of the path**:
 
 | Path starts with | Goes to |
 | --- | --- |
@@ -67,7 +77,8 @@ The Gateway picks the service from the **first part of the path**:
 | anything else | `404` from the Gateway |
 
 The path is forwarded unchanged: `GET /game/sessions` on the Gateway becomes
-`GET /game/sessions` on the Game Service.
+`GET http://broker:8070/queues/game/game/sessions`, and the broker sends
+`GET /game/sessions` to one Game copy.
 
 ---
 
@@ -119,8 +130,12 @@ not issue. If the two values differ, every request after login is `401`.
    removed. An `X-Player-Id` header with the id from the token is added, and an
    `X-Request-Id`: the caller's own, or a new one. It is returned to the client
    too, and both the Gateway and the service log it as `req=` (see Logs).
-5. **Answer.** Whatever the Game Service returns, status and body, goes back to
-   the client unchanged.
+5. **Queue.** The Gateway sends the request to the broker's queue for that
+   service, `http://broker:8070/queues/game/game/sessions`. A broker worker takes
+   it off the queue and sends it to the next Game copy in turn (round robin),
+   counting failures for the circuit breaker.
+6. **Answer.** Whatever the Game Service returns, status and body, goes back to
+   the client unchanged, with `X-Upstream-Instance` naming the copy.
 
 What can go wrong on the way, and who answers:
 
@@ -129,8 +144,8 @@ What can go wrong on the way, and who answers:
 | `401` | Gateway | No token, expired token, wrong signature |
 | `404` | Gateway | No service owns the path, or the path is `/<prefix>/internal/...` |
 | `429` | Gateway or service | Too many requests at once |
-| `503` | Gateway | The service is down or unreachable |
-| `504` | Gateway | The service took longer than `TASK_TIMEOUT` |
+| `503` | broker (or Gateway, when the broker is down) | The service is down or unreachable |
+| `504` | Gateway or broker | The service took longer than `TASK_TIMEOUT` |
 | `408` | service | The service's own work took longer than `TASK_TIMEOUT` |
 
 Errors made by the Gateway look like `{"error": {"code": "...", "message": "..."}}`.
@@ -150,22 +165,25 @@ The Game Service owns no player data and no map, so it asks for them:
 | An action finishes | `POST /players/{id}/xp` |
 | A tourist zombie steals | `GET /players/{id}/inventory`, `POST /players/{id}/inventory/consume` |
 
-These calls also go **through the Gateway**: in `compose.yml` the Game Service's
-`PLAYER_SERVICE_URL` and `WORLD_SERVICE_URL` are both `http://gateway:8080`.
+These calls go **through the Message Broker** (since Lab 4; before, through the
+Gateway): in `compose.yml` the Game Service's `PLAYER_SERVICE_URL` and
+`WORLD_SERVICE_URL` are both `http://broker:8070`. The broker routes by the first
+path segment, like the Gateway, onto the same queue the Gateway uses. The
+teammates' services call each other the same way: their `GATEWAY_URL` is the broker.
 
 ```
-Game Service                 Gateway                  Player Service
+Game Service              Message Broker              Player Service
   |  POST /players/{id}/xp     |                            |
   |  X-Internal-Key: <key>     |                            |
-  |--------------------------->|  key matches, no token     |
-  |                            |  needed                    |
+  |--------------------------->|  queue "player", next copy |
+  |                            |  in turn                   |
   |                            |--------------------------->|
   |<---------------------------|<---------------------------|
 ```
 
-A service has no player token, so it sends `X-Internal-Key` instead. The Gateway
-compares it with its own `INTERNAL_KEY`; when they match the caller counts as a
-service. Both sides must have the same value.
+A service has no player token, so it sends `X-Internal-Key` instead. The broker
+passes it on, and the Player Service accepts the call as coming from a service.
+Both sides must have the same value.
 
 This is why `online` stays `false` right after login: logging in does not change
 it. It turns `true` when the player joins a session, because that is when Game
@@ -183,6 +201,8 @@ client                     Gateway                    Game Service
   |  GET /ws/game             |                             |
   |  Bearer <token>           |                             |
   |-------------------------->|  checks the token           |
+  |                           |  asks the broker for the    |
+  |                           |  next game-public copy      |
   |<--------------------------|  {"url":"ws://localhost:8082/game", ...}
   |                                                         |
   |  ws://localhost:8082/game?session_id=<id>               |
@@ -204,13 +224,51 @@ The socket is a plain WebSocket, and it does not check a token itself. Only the
 REST is for when the caller needs the answer to continue. An event is for
 "this happened, whoever cares can react", and the publisher does not wait.
 
+### Topics in the Message Broker (Lab 4)
+
+```
+Player Service             Message Broker                 Game Service
+  | level up: the row AND the  |                               |
+  | event, one transaction     |                               |
+  | relay, every second:       |                               |
+  | POST /topics/player.leveled_up                             |
+  |--------------------------->|  who subscribed? (read from   |
+  |<---- 202 ------------------|  the Service Discovery): game |
+  | mark it published          |  POST /events, X-Internal-Key |
+  |                            |------------------------------>|  tell the sessions
+  |                            |<---------- 204 ---------------|  the player is in
+```
+
+- **The producer does not know who listens.** It publishes to the topic named
+  after the event type and gets `202`.
+- **Subscribing is part of registering.** Each instance sends its topics to the
+  Service Discovery (`"topics": ["player.leveled_up"]`); the broker reads
+  `GET /subscriptions` every 5 seconds.
+- **Each subscribing service gets the event once**, on one of its copies; a failing
+  copy counts against its circuit breaker and the next is tried (3 attempts).
+- **The outbox makes it safe.** The relay marks an event published only after the
+  broker's `202`, so while the broker is down events wait in the table and go out
+  later, in order. Two copies of a service share the outbox; `FOR UPDATE SKIP
+  LOCKED` gives each event to one of them.
+
+| Topic | Published by | Subscribed by (through the broker) |
+| --- | --- | --- |
+| `player.leveled_up` | Player | Game: sends `player_leveled_up` to the watchers of the player's sessions |
+| `game.action_completed` | Game | Player: logs it |
+| `player.registered` | Player | nobody yet |
+
+### The event streams for the teammates' services
+
+The teammates' services still read events from each producer's own WebSocket, as
+in Lab 2; only the negotiation moved from the Gateway to the broker.
+
 ```
 Player Service                                  Base, Crafting, Resource
   | register / level up                                   |
   | write the row AND the event, one transaction          |
   |   (table outbox_events)                               |
   |                                                       |
-  |        GET /ws/player  (asked of the Gateway, with X-Internal-Key)
+  |        GET /ws/player  (asked of the broker)          |
   |        -> {"url": "ws://player:8081/events"}          |
   |<======== WebSocket ws://player:8081/events ===========|
   |  <- {"op":"subscribe","types":[...],"since":0}        |
@@ -232,7 +290,7 @@ How it works, the same in both services:
    says which event types it wants and the last `seq` it has seen; the service
    sends everything after that and then keeps sending new rows, checking the
    table once a second.
-3. **The Gateway only negotiates**, exactly like the game socket: the consumer
+3. **The broker only negotiates**, exactly like the game socket: the consumer
    asks `GET /ws/player` or `GET /ws/game` and then connects directly.
 4. **Old events go.** Rows older than 7 days are deleted once an hour.
 
@@ -263,8 +321,10 @@ meant to stay open.
 | --- | --- | --- |
 | `JWT_SECRET` | Player, Gateway | each other, or every token is rejected |
 | `INTERNAL_KEY` | Player, Game, Gateway and the teammates' services | each other, or service-to-service calls and `/events` connections get `401` |
-| `PLAYER_SERVICE_URL`, `WORLD_SERVICE_URL` | Game | the Gateway, `http://gateway:8080` |
-| `GAME_PUBLIC_WS_URL` | Gateway | the Game Service address as seen from the host, `ws://localhost:8082` |
+| `PLAYER_SERVICE_URL`, `WORLD_SERVICE_URL` | Game | the broker, `http://broker:8070` |
+| `BROKER_URL` | Gateway, Player, Game | the broker, `http://broker:8070` |
+| `GATEWAY_URL` | the teammates' services | the broker, `http://broker:8070` (their calls to each other) |
+| `GAME_PUBLIC_URL` | broker | the Game Service address as seen from the host, `http://localhost:8082` |
 
 ---
 

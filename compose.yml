@@ -29,8 +29,11 @@ services:
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
-      # Registers there on startup, under its own container hostname.
+      # Registers there on startup, under its own container hostname, with the
+      # topics it subscribes to (game.action_completed).
       DISCOVERY_URL: http://discovery:8090
+      # The outbox is published to the broker's topics.
+      BROKER_URL: http://broker:8070
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
       # which the gateway's GET /logs reads.
       LOG_DIR: /logs
@@ -76,12 +79,14 @@ services:
     environment: &game-env
       PORT: ${GAME_PORT:-8082}
       DATABASE_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable
-      # Service-to-service REST goes through the gateway, which forwards
-      # /players to the player service.
-      PLAYER_SERVICE_URL: http://gateway:8080
-      # Asked about the room an action starts in; also through the gateway.
-      WORLD_SERVICE_URL: http://gateway:8080
-      # Sent as X-Internal-Key, so the gateway accepts game as a service.
+      # Service-to-service REST goes through the message broker, which routes
+      # /players to a player copy (round robin, circuit breaker).
+      PLAYER_SERVICE_URL: http://broker:8070
+      # Asked about the room an action starts in; also through the broker.
+      WORLD_SERVICE_URL: http://broker:8070
+      # The outbox is published to the broker's topics.
+      BROKER_URL: http://broker:8070
+      # Sent as X-Internal-Key on every call to another service.
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       # Empty means the built-in exam mock.
       EXAM_SERVICE_URL: ${EXAM_SERVICE_URL:-}
@@ -110,6 +115,8 @@ services:
       game-db:
         condition: service_healthy
       discovery:
+        condition: service_healthy
+      broker:
         condition: service_healthy
 
   game-2:
@@ -142,9 +149,9 @@ services:
       PORT: ${BASE_PORT:-8087}
       DATABASE_URL: postgres://${BASE_POSTGRES_USER:-postgres}:${BASE_POSTGRES_PASSWORD:-qwerty}@base-db:5432/${BASE_POSTGRES_DB:-base}?sslmode=disable
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
-      # REST to Resource, World and Player goes through the gateway, which also
-      # negotiates the URL of Player's event stream
-      GATEWAY_URL: http://gateway:8080
+      # REST to Resource, World and Player goes through the message broker, which
+      # also negotiates the URL of Player's event stream (GET /ws/player)
+      GATEWAY_URL: http://broker:8070
       TASK_TIMEOUT_MS: ${BASE_TASK_TIMEOUT_MS:-10000}
       MAX_CONCURRENT_TASKS: ${BASE_MAX_CONCURRENT_TASKS:-100}
     depends_on:
@@ -173,9 +180,9 @@ services:
       PORT: ${CRAFTING_PORT:-8088}
       DATABASE_URL: postgres://${CRAFTING_POSTGRES_USER:-postgres}:${CRAFTING_POSTGRES_PASSWORD:-qwerty}@crafting-db:5432/${CRAFTING_POSTGRES_DB:-crafting}?sslmode=disable
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
-      # REST to Resource and Player goes through the gateway, which also negotiates
-      # the URLs of Player's, Exam's and World's event streams
-      GATEWAY_URL: http://gateway:8080
+      # REST to Resource and Player goes through the message broker, which also
+      # negotiates the URLs of Player's, Exam's and World's event streams
+      GATEWAY_URL: http://broker:8070
       TASK_TIMEOUT_MS: ${CRAFTING_TASK_TIMEOUT_MS:-10000}
       MAX_CONCURRENT_TASKS: ${CRAFTING_MAX_CONCURRENT_TASKS:-100}
     depends_on:
@@ -207,8 +214,8 @@ services:
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT_MS: ${EXAM_TASK_TIMEOUT_MS:-10000}
       MAX_CONCURRENT_TASKS: ${EXAM_MAX_CONCURRENT_TASKS:-100}
-      # REST to Player and Zombie goes through the gateway; `mock` = built-in stand-ins
-      GATEWAY_URL: http://gateway:8080
+      # REST to Player and Zombie goes through the message broker; `mock` = built-in stand-ins
+      GATEWAY_URL: http://broker:8070
       PLAYER_CLIENT: ${EXAM_PLAYER_CLIENT:-http}
       ZOMBIE_CLIENT: ${EXAM_ZOMBIE_CLIENT:-http}
     depends_on:
@@ -240,10 +247,10 @@ services:
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT_MS: ${WORLD_TASK_TIMEOUT_MS:-10000}
       MAX_CONCURRENT_TASKS: ${WORLD_MAX_CONCURRENT_TASKS:-100}
-      # `gateway` = ask the gateway for Exam's /events URL, then connect directly;
-      # `off` = not connected (use POST /world/internal/events)
+      # `gateway` = ask GATEWAY_URL (the message broker) for Exam's /events URL, then
+      # connect directly; `off` = not connected (use POST /world/internal/events)
       EXAM_EVENTS_URL: ${WORLD_EXAM_EVENTS_URL-gateway}
-      GATEWAY_URL: http://gateway:8080
+      GATEWAY_URL: http://broker:8070
     depends_on:
       world-db:
         condition: service_healthy
@@ -310,13 +317,13 @@ services:
       DB_USERNAME: ${RESOURCE_POSTGRES_USER:-postgres}
       DB_PASSWORD: ${RESOURCE_POSTGRES_PASSWORD:-qwerty}
       DB_NAME: ${RESOURCE_POSTGRES_DB:-resource}
-      # World is called through the gateway; empty = built-in World mock
-      WORLD_SERVICE_URL: ${RESOURCE_WORLD_SERVICE_URL-http://gateway:8080}
-      # `gateway` = ask the gateway for the producer's /events URL, then connect
-      # directly; empty = not connected (use POST /resources/internal/events)
+      # World is called through the message broker; empty = built-in World mock
+      WORLD_SERVICE_URL: ${RESOURCE_WORLD_SERVICE_URL-http://broker:8070}
+      # `gateway` = ask GATEWAY_URL (the message broker) for the producer's /events
+      # URL, then connect directly; empty = not connected (use POST /resources/internal/events)
       PLAYER_EVENTS_URL: ${RESOURCE_PLAYER_EVENTS_URL-gateway}
       GAME_EVENTS_URL: ${RESOURCE_GAME_EVENTS_URL-gateway}
-      GATEWAY_URL: http://gateway:8080
+      GATEWAY_URL: http://broker:8070
     depends_on:
       resource-db:
         condition: service_healthy
@@ -348,15 +355,29 @@ services:
       retries: 10
 
   broker:
-    # The Message Broker (Lab 4). Nothing is routed through it yet.
+    # The Message Broker (Lab 4): every request from the gateway goes through its
+    # queue for the service, every service-to-service call through it too, and
+    # events are published to its topics. Load balancing and circuit breakers live here.
     image: ${DOCKERHUB_USERNAME:-fish3008}/broker_service:${BROKER_SERVICE_TAG:-4}
     # Built from the submodule until tag 4 is published on Docker Hub.
     build: ./services/broker_service
     restart: unless-stopped
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      # Running instances and their topics are read from here every 5 s.
       DISCOVERY_URL: http://discovery:8090
       SERVICE_URL: http://broker:8070
+      # Used for a service none of whose instances is registered (the teammates').
+      PLAYER_SERVICE_URL: http://player:${PLAYER_PORT:-8081}
+      GAME_SERVICE_URL: http://game:${GAME_PORT:-8082}
+      EXAM_SERVICE_URL: http://exam:${EXAM_PORT:-8083}
+      WORLD_SERVICE_URL: http://world:${WORLD_PORT:-8084}
+      ZOMBIE_SERVICE_URL: http://zombie:${ZOMBIE_PORT:-8085}
+      RESOURCE_SERVICE_URL: http://resource:${RESOURCE_PORT:-8086}
+      BASE_SERVICE_URL: http://base:${BASE_PORT:-8087}
+      CRAFTING_SERVICE_URL: http://crafting:${CRAFTING_PORT:-8088}
+      # Where a browser opens the Game socket, when no game-public copy is registered.
+      GAME_PUBLIC_URL: http://localhost:${GAME_PORT:-8082}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
@@ -382,23 +403,15 @@ services:
     build: ./services/gateway_service
     restart: unless-stopped
     environment:
-      PLAYER_SERVICE_URL: http://player:${PLAYER_PORT:-8081}
-      GAME_SERVICE_URL: http://game:${GAME_PORT:-8082}
-      EXAM_SERVICE_URL: http://exam:${EXAM_PORT:-8083}
-      WORLD_SERVICE_URL: http://world:${WORLD_PORT:-8084}
-      ZOMBIE_SERVICE_URL: http://zombie:${ZOMBIE_PORT:-8085}
-      RESOURCE_SERVICE_URL: http://resource:${RESOURCE_PORT:-8086}
-      BASE_SERVICE_URL: http://base:${BASE_PORT:-8087}
-      CRAFTING_SERVICE_URL: http://crafting:${CRAFTING_PORT:-8088}
-      # Handed to clients by GET /ws/game, so it is the address on the host.
-      GAME_PUBLIC_WS_URL: ws://localhost:${GAME_PORT:-8082}
+      # Every request is put on the broker's queue for the service that owns its
+      # path; the broker picks the copy and runs the circuit breakers.
+      BROKER_URL: http://broker:8070
       # Verifies the HS256 tokens the player service signs with the same value.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
-      # The list of running instances is read from here; a service that is not
-      # on it is reached at its fixed URL above.
+      # Registers itself there, so its health and load are checked.
       DISCOVERY_URL: http://discovery:8090
       # Its own log file goes here, and GET /logs reads every service's file from here.
       LOG_DIR: /logs
@@ -408,6 +421,7 @@ services:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
       - discovery
+      - broker
       - player
       - game
       - game-2

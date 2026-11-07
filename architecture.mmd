@@ -2,13 +2,13 @@
 %%   npx -p @mermaid-js/mermaid-cli mmdc -i architecture.mmd -o architecture.png -s 2 -b white
 %%{init: {"flowchart": {"wrappingWidth": 600, "nodeSpacing": 50, "rankSpacing": 90}, "themeVariables": {"fontSize": "15px"}}}%%
 flowchart TB
-    %% ranks, top to bottom: browser, gateway, our services, then the teammates and Discovery side by side, Telegram
+    %% ranks, top to bottom: browser, gateway, broker, our services, then the teammates and Discovery side by side, Telegram
 
     client(["<b>Game client</b> · browser · nginx on :3000, /api proxied to the gateway"])
 
-    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the one door for all REST<br/>JWT check, X-Player-Id, task limits · <b>round robin</b> over the copies listed in Discovery<br/><b>circuit breaker</b>: 3 failures of a copy within TASK_TIMEOUT × 3.5 → removed · GET /ws/game → a Game copy, in turn<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
+    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/>GET /ws/game → a Game copy, chosen by the broker<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
 
-    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /health<br/>next steps: a queue per service (gateway → service), topics (service → subscribers),<br/>load balancing and circuit breakers moved here from the gateway"]
+    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: POST /topics/&lt;type&gt; → POST /events on one copy of every subscribing service · subscriptions read from Discovery<br/><b>round robin</b> over the copies in Discovery · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered"]
 
     subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db"]
         direction LR
@@ -32,7 +32,7 @@ flowchart TB
         crafting["<b>Crafting</b><br/>Go"]
     end
 
-    discovery["<b>Service Discovery</b> · Python / FastAPI · :8090<br/>in-memory registry: /register · /deregister · /services · /services/health<br/><b>health check</b> of every copy every 10 s: ok · critical (≥ 80 % or refusing) · unhealthy<br/>drops copies not renewed for 45 s"]
+    discovery["<b>Service Discovery</b> · Python / FastAPI · :8090<br/>in-memory registry: /register (with topics) · /deregister · /services · /subscriptions · /services/health<br/><b>health check</b> of every copy every 10 s: ok · critical (≥ 80 % or refusing) · unhealthy<br/>drops copies not renewed for 45 s"]
 
     telegram(["<b>Telegram</b> · developers' chat · ALERT · RESOLVED · REMOVED"])
 
@@ -42,25 +42,28 @@ flowchart TB
     client -- "REST · cookie or Bearer" --> gateway
     client -. "WebSocket, direct · URL from GET /ws/game" .-> gamecopies
 
-    %% REST through the gateway
-    gateway -- "/auth /players /trades · round robin" --> playercopies
-    gateway -- "/game · round robin" --> gamecopies
-    gateway -- "/exams /world /zombies /resources /base /crafting" --> team
+    %% every request through the broker
+    gateway -- "/queues/&lt;service&gt;/… · every client request" --> broker
+    broker -- "player queue · round robin" --> playercopies
+    broker -- "game queue · round robin" --> gamecopies
+    broker -- "exam, world, zombie, resource, base, crafting queues" --> team
+    gamecopies -- "/players /world · X-Internal-Key<br/>POST /topics: game.action_completed" --> broker
+    playercopies -- "POST /topics: player.registered, player.leveled_up" --> broker
+    team -- "their calls to each other · GATEWAY_URL = broker" --> broker
 
     %% control plane, straight to Discovery
     playercopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
     gamecopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
-    gateway == "GET /services every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
-    broker == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
+    gateway == "POST /register every 15 s" ==> discovery
+    broker == "GET /services, /subscriptions every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
     gateway -- "GET /logs reads every file" --> logs
-    gateway --o|"planned: every request through the broker"| broker
     discovery -- "alerts" --> telegram
 
-    %% events for other services (/events WebSockets)
+    %% events for the teammates' services (/events WebSockets, URL negotiated with the broker)
     playercopies -. "player.registered<br/>player.leveled_up" .-> team
     gamecopies -. "game.action_completed" .-> team
 
-    legend["<b>Legend</b> · solid: REST through the gateway (service-to-service calls too, with X-Internal-Key)<br/>thick: registration, health checks and the registry, straight to Discovery · dashed: WebSockets opened directly<br/>circle end: planned in the next steps of Lab 4<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
+    legend["<b>Legend</b> · solid: REST, every request through the broker (topics too)<br/>thick: registration, health checks, the registry and subscriptions, straight to Discovery · dashed: WebSockets opened directly<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
     telegram ~~~ legend
 
     classDef py fill:#1f2937,color:#ffffff,stroke:#15803d,stroke-width:4px
