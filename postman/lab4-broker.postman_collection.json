@@ -347,7 +347,12 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
             "url": "{{brokerUrl}}/queues/player/health"
           }
         },
@@ -367,7 +372,12 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
             "url": "{{brokerUrl}}/queues/player/health"
           }
         },
@@ -386,7 +396,12 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
             "url": "{{brokerUrl}}/queues/nope/x"
           }
         },
@@ -604,7 +619,7 @@
           }
         },
         {
-          "name": "Event, end to end: 150 XP makes level 2 (player.leveled_up in the outbox)",
+          "name": "Event, end to end: 150 XP makes level 2 (a service call, through the broker)",
           "event": [
             {
               "listen": "test",
@@ -621,15 +636,15 @@
             "method": "POST",
             "header": [
               {
-                "key": "Authorization",
-                "value": "Bearer {{token}}"
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
               },
               {
                 "key": "Content-Type",
                 "value": "application/json"
               }
             ],
-            "url": "{{gatewayUrl}}/players/{{eventPlayerId}}/xp",
+            "url": "{{brokerUrl}}/players/{{eventPlayerId}}/xp",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"delta\": 150,\n  \"reason\": \"postman lab 4\"\n}",
@@ -705,6 +720,375 @@
               }
             ],
             "url": "{{gatewayUrl}}/game/sessions/{{eventSessionId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Topics list, gRPC between services, closed gateway",
+      "item": [
+        {
+          "name": "GET /topics: every topic, its subscribers and counts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const topics = pm.response.json().topics;",
+                  "const byName = Object.fromEntries(topics.map(t => [t.topic, t]));",
+                  "pm.test('player.leveled_up goes to game', () => pm.expect(byName['player.leveled_up'].subscribers).to.include('game'));",
+                  "pm.test('game.action_completed goes to player', () => pm.expect(byName['game.action_completed'].subscribers).to.include('player'));",
+                  "pm.test('the level-up of folder 3 was published and delivered', () => {",
+                  "    pm.expect(byName['player.leveled_up'].published).to.be.at.least(1);",
+                  "    pm.expect(byName['player.leveled_up'].delivered).to.be.at.least(1);",
+                  "});",
+                  "pm.test('every entry has its counts', () => topics.forEach(t => pm.expect(t).to.have.all.keys('topic', 'subscribers', 'published', 'delivered', 'lost')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/topics"
+          }
+        },
+        {
+          "name": "Thread per request: this request has a thread of its own",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('/health is answered off the count, the rest one thread each', () => pm.expect(pm.response.json().request_threads).to.be.at.least(0));",
+                  "pm.test('the gRPC pool and workers are threads too', () => pm.expect(pm.response.json().threads).to.be.above(pm.response.json().request_threads));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/health"
+          }
+        },
+        {
+          "name": "Each instance registered its gRPC address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const grpc = pm.response.json();",
+                  "pm.test('both player copies serve gRPC on 9081', () => pm.expect(Object.keys(grpc.player || {}).filter(a => a.endsWith(':9081')).length).to.be.at.least(2));",
+                  "pm.test('both game copies serve gRPC on 9082', () => pm.expect(Object.keys(grpc.game || {}).filter(a => a.endsWith(':9082')).length).to.be.at.least(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/grpc"
+          }
+        },
+        {
+          "name": "Game -> broker -> Player over gRPC: the calls of folder 3, in the logs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const lines = pm.response.text().split('\\n');",
+                  "pm.test('the broker forwarded Get (the host check when the session was created)', () => pm.expect(lines.some(l => l.includes('[broker-grpc] /player.Player/Get OK') && l.includes('-> player at'))).to.be.true);",
+                  "pm.test('a player copy answered it over gRPC', () => pm.expect(lines.some(l => l.includes('[player-grpc] /player.Player/Get OK'))).to.be.true);",
+                  "pm.test('presence went the same way', () => pm.expect(lines.some(l => l.includes('/player.Player/SetPresence OK'))).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/logs?contains=/player.Player/"
+          }
+        },
+        {
+          "name": "Events over gRPC: Publish to the broker, Deliver to the subscriber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const lines = pm.response.text().split('\\n');",
+                  "pm.test('player published with events.Broker/Publish', () => pm.expect(lines.some(l => l.includes('[broker-grpc] /events.Broker/Publish OK') && l.includes('topic=player.leveled_up'))).to.be.true);",
+                  "pm.test('the broker delivered with events.Consumer/Deliver', () => pm.expect(lines.some(l => l.includes('[broker-topic] player.leveled_up') && l.includes('(gRPC)'))).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/logs?contains=player.leveled_up"
+          }
+        },
+        {
+          "name": "Closed on the gateway: POST /players/{id}/xp, even with a token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404: only services may grant XP, through the broker', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{eventPlayerId}}/xp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delta\": 1000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Closed on the gateway: the internal key opens nothing there",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{eventPlayerId}}/presence",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"online\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Closed on the gateway: /<prefix>/internal/...",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/resources/internal/events",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Closed on the gateway: a teammate's service-only route (GET /world/spawn-points)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/world/spawn-points"
+          }
+        },
+        {
+          "name": "Still open on the gateway: a player's own routes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{eventPlayerId}}"
+          }
+        },
+        {
+          "name": "The event streams are negotiated with the broker, not the gateway",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 on the gateway', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/ws/player"
+          }
+        },
+        {
+          "name": "The broker refuses a call between services without the key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/players/{{eventPlayerId}}"
+          }
+        },
+        {
+          "name": "The broker refuses its queues without the key (only the gateway has it)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/queues/player/health"
           }
         }
       ]

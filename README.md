@@ -29,7 +29,8 @@ Three rules hold everywhere:
    `/game` → Game, …) and puts the request on the Message Broker's queue for that
    service. Calls between services and events go to the broker directly.
 2. **Credentials stop at the door.** The gateway verifies the JWT and passes
-   `X-Player-Id` on. Services calling services send `X-Internal-Key` instead.
+   `X-Player-Id` on. It serves players only: routes for services answer `404`
+   there. Services calling services go to the broker with `X-Internal-Key`.
 3. **One database per service.** Others ask over REST or listen for an event.
 
 WebSockets do not pass through the gateway or the broker: `GET /ws/<service>`
@@ -39,8 +40,8 @@ returns the URL to connect to directly.
 
 ```
 browser -> gateway -> broker /queues/player/... -> [queue player] -> one player copy
-game    ->            broker /players/7        -> [queue player] -> one player copy
-player  ->            broker /topics/player.leveled_up -> every subscribing service
+game    -> gRPC player.Player/AddXP (:50051)   -> forwarded undecoded -> one player copy
+player  -> gRPC events.Broker/Publish          -> events.Consumer/Deliver on every subscriber
 ```
 
 - **Subscriber-based queues** (gateway → service): the gateway names the service,
@@ -50,7 +51,12 @@ player  ->            broker /topics/player.leveled_up -> every subscribing serv
   Player and Game publish their outbox to the broker; Game listens to
   `player.leveled_up`, Player to `game.action_completed`.
 - **Load balancing and circuit breakers** moved here from the gateway.
-- `GET localhost:8070/health` shows queue depths and published / delivered / lost per topic.
+- **gRPC between our services**: Game calls Player (`player.Player`) and both
+  publish and receive events (`events.Broker`, `events.Consumer`) over gRPC through
+  the broker; the teammates' services keep REST through it.
+- **Thread per request**: every HTTP request to the broker runs on a thread of its own.
+- `GET localhost:8070/topics` lists every topic, its subscribers and counts;
+  `/health` shows queue depths and threads.
 
 Details: [services/broker_service/README.md](services/broker_service/README.md),
 [flow.md](flow.md) sections 3, 4 and 6.

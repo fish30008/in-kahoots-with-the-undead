@@ -47,7 +47,9 @@ Three rules hold the design together:
    call between services, and every event, goes to the broker on port 8070.
    Nobody calls a service directly.
 2. **Credentials stop at the door.** The Gateway checks the token. The services
-   behind it never see it.
+   behind it never see it. The Gateway serves players only: routes for services
+   (`/<prefix>/internal/...`, `POST /players/{id}/xp`, ...) answer `404` there, and
+   services reach them through the broker with `X-Internal-Key`.
 3. **One database per service.** Game never reads Player's tables. When it needs
    a player, it asks over REST.
 
@@ -157,33 +159,40 @@ Errors made by our Go services look like `{"error": "..."}`.
 
 The Game Service owns no player data and no map, so it asks for them:
 
-| When | Call |
+| When | Call (gRPC, `player.Player`) |
 | --- | --- |
-| A player joins a session | `GET /players/{id}` to check the player exists |
-| A player joins or leaves | `PUT /players/{id}/presence` to flip `online` |
-| An action starts | `GET /world/rooms/{id}`: the room must exist and be unlocked, and `scavenge` needs a room with a resource node |
-| An action finishes | `POST /players/{id}/xp` |
-| A tourist zombie steals | `GET /players/{id}/inventory`, `POST /players/{id}/inventory/consume` |
+| A player joins a session | `Get` to check the player exists |
+| A player joins or leaves | `SetPresence` to flip `online` |
+| An action starts | `GET /world/rooms/{id}` (REST: World is a teammate's): the room must exist and be unlocked, and `scavenge` needs a room with a resource node |
+| An action finishes | `AddXP` |
+| A tourist zombie steals | `Inventory`, `ConsumeItem` |
 
-These calls go **through the Message Broker** (since Lab 4; before, through the
-Gateway): in `compose.yml` the Game Service's `PLAYER_SERVICE_URL` and
-`WORLD_SERVICE_URL` are both `http://broker:8070`. The broker routes by the first
-path segment, like the Gateway, onto the same queue the Gateway uses. The
-teammates' services call each other the same way: their `GATEWAY_URL` is the broker.
+Since Lab 4 the calls to Player are **gRPC, through the Message Broker** (before:
+REST through the Gateway). Game dials the broker's gRPC port (`BROKER_GRPC`,
+`broker:50051`); the broker reads the method name, `/player.Player/AddXP`, takes
+the service from it (`player`), picks the next Player copy by the gRPC addresses
+they registered (`<host>:9081`), and forwards the call without decoding it. The
+protos live in the broker repo (`proto/`) and are generated into each service.
 
 ```
 Game Service              Message Broker              Player Service
-  |  POST /players/{id}/xp     |                            |
-  |  X-Internal-Key: <key>     |                            |
-  |--------------------------->|  queue "player", next copy |
-  |                            |  in turn                   |
+  |  gRPC player.Player/AddXP  |                            |
+  |  x-internal-key: <key>     |                            |
+  |--------------------------->|  package "player", next    |
+  |                            |  copy in turn (:9081)      |
   |                            |--------------------------->|
-  |<---------------------------|<---------------------------|
+  |<---------------------------|<---------------------------|  XPResult{xp, level}
 ```
 
-A service has no player token, so it sends `X-Internal-Key` instead. The broker
-passes it on, and the Player Service accepts the call as coming from a service.
-Both sides must have the same value.
+A service has no player token, so it sends the internal key instead (metadata
+over gRPC, `X-Internal-Key` over REST). The broker checks it and passes it on, and
+the Player Service accepts the call as coming from a service. Both sides must
+have the same value.
+
+The World Service and the teammates' services are not ours to change, so their
+calls stay REST through the broker: `WORLD_SERVICE_URL` and the teammates'
+`GATEWAY_URL` are `http://broker:8070`, routed by the first path segment onto the
+same queues the Gateway uses.
 
 This is why `online` stays `false` right after login: logging in does not change
 it. It turns `true` when the player joins a session, because that is when Game
@@ -231,12 +240,12 @@ Player Service             Message Broker                 Game Service
   | level up: the row AND the  |                               |
   | event, one transaction     |                               |
   | relay, every second:       |                               |
-  | POST /topics/player.leveled_up                             |
+  | gRPC events.Broker/Publish |                               |
   |--------------------------->|  who subscribed? (read from   |
-  |<---- 202 ------------------|  the Service Discovery): game |
-  | mark it published          |  POST /events, X-Internal-Key |
+  |<---- Published{1} ---------|  the Service Discovery): game |
+  | mark it published          |  gRPC events.Consumer/Deliver |
   |                            |------------------------------>|  tell the sessions
-  |                            |<---------- 204 ---------------|  the player is in
+  |                            |<---------- OK ----------------|  the player is in
 ```
 
 - **The producer does not know who listens.** It publishes to the topic named
@@ -321,8 +330,9 @@ meant to stay open.
 | --- | --- | --- |
 | `JWT_SECRET` | Player, Gateway | each other, or every token is rejected |
 | `INTERNAL_KEY` | Player, Game, Gateway and the teammates' services | each other, or service-to-service calls and `/events` connections get `401` |
-| `PLAYER_SERVICE_URL`, `WORLD_SERVICE_URL` | Game | the broker, `http://broker:8070` |
-| `BROKER_URL` | Gateway, Player, Game | the broker, `http://broker:8070` |
+| `WORLD_SERVICE_URL` | Game | the broker, `http://broker:8070` |
+| `BROKER_URL` | Gateway | the broker, `http://broker:8070` |
+| `BROKER_GRPC` | Player, Game | the broker's gRPC port, `broker:50051` |
 | `GATEWAY_URL` | the teammates' services | the broker, `http://broker:8070` (their calls to each other) |
 | `GAME_PUBLIC_URL` | broker | the Game Service address as seen from the host, `http://localhost:8082` |
 

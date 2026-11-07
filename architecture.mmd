@@ -6,19 +6,19 @@ flowchart TB
 
     client(["<b>Game client</b> · browser · nginx on :3000, /api proxied to the gateway"])
 
-    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/>GET /ws/game → a Game copy, chosen by the broker<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
+    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
 
-    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: POST /topics/&lt;type&gt; → POST /events on one copy of every subscribing service · subscriptions read from Discovery<br/><b>round robin</b> over the copies in Discovery · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered"]
+    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>round robin</b> over the copies in Discovery · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered"]
 
     subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db"]
         direction LR
-        player1["<b>player-1</b> · :8081<br/>accounts, login + JWT, XP,<br/>items, inventory, trades"]
+        player1["<b>player-1</b> · :8081 REST · :9081 gRPC<br/>accounts, login + JWT, XP,<br/>items, inventory, trades"]
         player2["<b>player-2</b> · :8081<br/>same image"]
     end
 
     subgraph gamecopies["Game (ours, Go) · 2 copies · share game-db · live events between them via Postgres NOTIFY / LISTEN · clock on the advisory-lock holder"]
         direction LR
-        game1["<b>game</b> · :8082<br/>sessions, day/night,<br/>actions, zombies"]
+        game1["<b>game</b> · :8082 · :9082 gRPC<br/>sessions, day/night,<br/>actions, zombies"]
         game2["<b>game-2</b> · :8083<br/>same image"]
     end
 
@@ -32,7 +32,7 @@ flowchart TB
         crafting["<b>Crafting</b><br/>Go"]
     end
 
-    discovery["<b>Service Discovery</b> · Python / FastAPI · :8090<br/>in-memory registry: /register (with topics) · /deregister · /services · /subscriptions · /services/health<br/><b>health check</b> of every copy every 10 s: ok · critical (≥ 80 % or refusing) · unhealthy<br/>drops copies not renewed for 45 s"]
+    discovery["<b>Service Discovery</b> · Python / FastAPI · :8090<br/>in-memory registry: /register (with topics, gRPC address) · /deregister · /services · /grpc · /subscriptions · /services/health<br/><b>health check</b> of every copy every 10 s: ok · critical (≥ 80 % or refusing) · unhealthy<br/>drops copies not renewed for 45 s"]
 
     telegram(["<b>Telegram</b> · developers' chat · ALERT · RESOLVED · REMOVED"])
 
@@ -44,18 +44,18 @@ flowchart TB
 
     %% every request through the broker
     gateway -- "/queues/&lt;service&gt;/… · every client request" --> broker
-    broker -- "player queue · round robin" --> playercopies
-    broker -- "game queue · round robin" --> gamecopies
+    broker -- "player queue (REST) · player.Player and events.Consumer (gRPC) · round robin" --> playercopies
+    broker -- "game queue (REST) · events.Consumer (gRPC) · round robin" --> gamecopies
     broker -- "exam, world, zombie, resource, base, crafting queues" --> team
-    gamecopies -- "/players /world · X-Internal-Key<br/>POST /topics: game.action_completed" --> broker
-    playercopies -- "POST /topics: player.registered, player.leveled_up" --> broker
-    team -- "their calls to each other · GATEWAY_URL = broker" --> broker
+    gamecopies == "gRPC player.Player/* · events.Broker/Publish<br/>REST /world · internal key" ==> broker
+    playercopies == "gRPC events.Broker/Publish:<br/>player.registered, player.leveled_up" ==> broker
+    team -- "their calls to each other (REST, X-Internal-Key) · GATEWAY_URL = broker" --> broker
 
     %% control plane, straight to Discovery
     playercopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
     gamecopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
     gateway == "POST /register every 15 s" ==> discovery
-    broker == "GET /services, /subscriptions every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
+    broker == "GET /services, /grpc, /subscriptions every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
     gateway -- "GET /logs reads every file" --> logs
     discovery -- "alerts" --> telegram
 
@@ -63,7 +63,7 @@ flowchart TB
     playercopies -. "player.registered<br/>player.leveled_up" .-> team
     gamecopies -. "game.action_completed" .-> team
 
-    legend["<b>Legend</b> · solid: REST, every request through the broker (topics too)<br/>thick: registration, health checks, the registry and subscriptions, straight to Discovery · dashed: WebSockets opened directly<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
+    legend["<b>Legend</b> · solid: REST, every request through the broker · thick into the broker: gRPC between our services<br/>thick into Discovery: registration, health checks, the registry and subscriptions · dashed: WebSockets opened directly<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
     telegram ~~~ legend
 
     classDef py fill:#1f2937,color:#ffffff,stroke:#15803d,stroke-width:4px

@@ -11,6 +11,10 @@
       "description": "The Gateway: every request except the two service health checks."
     },
     {
+      "key": "brokerUrl",
+      "value": "http://localhost:8070"
+    },
+    {
       "key": "discoveryUrl",
       "value": "http://localhost:8090"
     },
@@ -1681,7 +1685,7 @@
           ]
         },
         {
-          "name": "The resources landed in the Resource Service",
+          "name": "The resources landed in the Resource Service (read as a service, through the broker)",
           "request": {
             "method": "GET",
             "header": [
@@ -1690,8 +1694,11 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/resources/players/{{rewardPlayerId}}",
-            "description": "Room 3 has a metal node. The Resource Service credits 5 to 15 metal when it receives game.action_completed, on top of the 4 every player starts with. Read as a service, because a player may only read their own balances."
+            "url": "{{brokerUrl}}/resources/players/{{rewardPlayerId}}",
+            "description": "Room 3 has a metal node. The Resource Service credits 5 to 15 metal when it receives game.action_completed, on top of the 4 every player starts with. Read as a service, because a player may only read their own balances.",
+            "auth": {
+              "type": "noauth"
+            }
           },
           "event": [
             {

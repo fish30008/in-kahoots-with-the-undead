@@ -11,6 +11,10 @@
       "description": "The Gateway."
     },
     {
+      "key": "brokerUrl",
+      "value": "http://localhost:8070"
+    },
+    {
       "key": "discoveryUrl",
       "value": "http://localhost:8090"
     },
@@ -548,7 +552,7 @@
       "name": "Inventory",
       "item": [
         {
-          "name": "Grant 5 items to player",
+          "name": "Grant 5 items to player (a service call, through the broker)",
           "event": [
             {
               "listen": "test",
@@ -572,6 +576,10 @@
               {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
               }
             ],
             "body": {
@@ -583,12 +591,15 @@
                 }
               }
             },
-            "url": "{{baseUrl}}/players/{{playerId}}/inventory/items",
-            "description": "Grants items. Called again with the same item, it adds to the amount already held."
+            "url": "{{brokerUrl}}/players/{{playerId}}/inventory/items",
+            "description": "Grants items. Called again with the same item, it adds to the amount already held.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
-          "name": "Consume 2 items",
+          "name": "Consume 2 items (a service call, through the broker)",
           "event": [
             {
               "listen": "test",
@@ -607,6 +618,10 @@
               {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
               }
             ],
             "body": {
@@ -618,8 +633,11 @@
                 }
               }
             },
-            "url": "{{baseUrl}}/players/{{playerId}}/inventory/consume",
-            "description": "Uses up items, for example drinking a coffee."
+            "url": "{{brokerUrl}}/players/{{playerId}}/inventory/consume",
+            "description": "Uses up items, for example drinking a coffee.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -649,7 +667,7 @@
           }
         },
         {
-          "name": "An item that is not in the catalog is 422",
+          "name": "An item that is not in the catalog is 422 (a service call, through the broker)",
           "event": [
             {
               "listen": "test",
@@ -669,6 +687,10 @@
               {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
               }
             ],
             "body": {
@@ -680,7 +702,10 @@
                 }
               }
             },
-            "url": "{{baseUrl}}/players/{{playerId}}/inventory/items"
+            "url": "{{brokerUrl}}/players/{{playerId}}/inventory/items",
+            "auth": {
+              "type": "noauth"
+            }
           }
         }
       ]

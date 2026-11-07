@@ -32,8 +32,11 @@ services:
       # Registers there on startup, under its own container hostname, with the
       # topics it subscribes to (game.action_completed).
       DISCOVERY_URL: http://discovery:8090
-      # The outbox is published to the broker's topics.
-      BROKER_URL: http://broker:8070
+      # The outbox is published to the broker's topics, over gRPC.
+      BROKER_GRPC: broker:50051
+      # gRPC for other services (player.Player, events.Consumer), reached through the
+      # broker only; registered with the Service Discovery as <hostname>:9081.
+      GRPC_PORT: 9081
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
       # which the gateway's GET /logs reads.
       LOG_DIR: /logs
@@ -79,14 +82,16 @@ services:
     environment: &game-env
       PORT: ${GAME_PORT:-8082}
       DATABASE_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable
-      # Service-to-service REST goes through the message broker, which routes
-      # /players to a player copy (round robin, circuit breaker).
-      PLAYER_SERVICE_URL: http://broker:8070
-      # Asked about the room an action starts in; also through the broker.
+      # The Player Service is called over gRPC, through the broker, which forwards
+      # each call to a player copy (round robin, circuit breaker). The outbox is
+      # published to the broker's topics there too.
+      BROKER_GRPC: broker:50051
+      # gRPC for other services (events.Consumer), registered as <hostname>:9082.
+      GRPC_PORT: 9082
+      # Asked about the room an action starts in: the World Service is a teammate's,
+      # so this stays REST, through the broker.
       WORLD_SERVICE_URL: http://broker:8070
-      # The outbox is published to the broker's topics.
-      BROKER_URL: http://broker:8070
-      # Sent as X-Internal-Key on every call to another service.
+      # Sent with every call to another service (X-Internal-Key / gRPC metadata).
       INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
       # Empty means the built-in exam mock.
       EXAM_SERVICE_URL: ${EXAM_SERVICE_URL:-}
@@ -367,6 +372,8 @@ services:
       # Running instances and their topics are read from here every 5 s.
       DISCOVERY_URL: http://discovery:8090
       SERVICE_URL: http://broker:8070
+      # gRPC: Broker.Publish, and calls between our services forwarded to an instance.
+      GRPC_PORT: 50051
       # Used for a service none of whose instances is registered (the teammates').
       PLAYER_SERVICE_URL: http://player:${PLAYER_PORT:-8081}
       GAME_SERVICE_URL: http://game:${GAME_PORT:-8082}
