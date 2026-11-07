@@ -6,7 +6,9 @@ flowchart TB
 
     client(["<b>Game client</b> · browser · nginx on :3000, /api proxied to the gateway"])
 
-    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the one door for all REST<br/>JWT check, X-Player-Id, task limits · <b>round robin</b> over the copies listed in Discovery<br/><b>circuit breaker</b>: 3 failures of a copy within TASK_TIMEOUT × 3.5 → removed · GET /ws/game → a Game copy, in turn"]
+    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the one door for all REST<br/>JWT check, X-Player-Id, task limits · <b>round robin</b> over the copies listed in Discovery<br/><b>circuit breaker</b>: 3 failures of a copy within TASK_TIMEOUT × 3.5 → removed · GET /ws/game → a Game copy, in turn<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
+
+    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /health<br/>next steps: a queue per service (gateway → service), topics (service → subscribers),<br/>load balancing and circuit breakers moved here from the gateway"]
 
     subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db"]
         direction LR
@@ -34,6 +36,8 @@ flowchart TB
 
     telegram(["<b>Telegram</b> · developers' chat · ALERT · RESOLVED · REMOVED"])
 
+    logs[("<b>logs volume</b> · /logs/&lt;service&gt;-&lt;hostname&gt;.log, rotated at 5 MB, 3 kept<br/>written by gateway, discovery, broker, every Player and Game copy<br/>one shape: time LEVEL [service-component] message req=…")]
+
     %% browser
     client -- "REST · cookie or Bearer" --> gateway
     client -. "WebSocket, direct · URL from GET /ws/game" .-> gamecopies
@@ -47,13 +51,16 @@ flowchart TB
     playercopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
     gamecopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
     gateway == "GET /services every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
+    broker == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
+    gateway -- "GET /logs reads every file" --> logs
+    gateway --o|"planned: every request through the broker"| broker
     discovery -- "alerts" --> telegram
 
     %% events for other services (/events WebSockets)
     playercopies -. "player.registered<br/>player.leveled_up" .-> team
     gamecopies -. "game.action_completed" .-> team
 
-    legend["<b>Legend</b> · solid: REST through the gateway (service-to-service calls too, with X-Internal-Key)<br/>thick: registration, health checks and the registry, straight to Discovery · dashed: WebSockets opened directly<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
+    legend["<b>Legend</b> · solid: REST through the gateway (service-to-service calls too, with X-Internal-Key)<br/>thick: registration, health checks and the registry, straight to Discovery · dashed: WebSockets opened directly<br/>circle end: planned in the next steps of Lab 4<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
     telegram ~~~ legend
 
     classDef py fill:#1f2937,color:#ffffff,stroke:#15803d,stroke-width:4px
@@ -62,11 +69,11 @@ flowchart TB
     classDef ts fill:#fef3c7,stroke:#d97706,color:#111827
     classDef ext fill:#f3f4f6,stroke:#6b7280,color:#111827
     classDef note fill:#ffffff,stroke:#9ca3af,color:#374151,stroke-dasharray:4 3
-    class gateway,discovery py
+    class gateway,discovery,broker py
     class player1,player2,game1,game2 mineGo
     class base,crafting go
     class exam,world,zombie,resource ts
-    class client,telegram ext
+    class client,telegram,logs ext
     class legend note
     style playercopies fill:#f0fdf4,stroke:#15803d
     style gamecopies fill:#f0fdf4,stroke:#15803d

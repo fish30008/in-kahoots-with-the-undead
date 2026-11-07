@@ -15,7 +15,9 @@ services:
       retries: 10
 
   player:
-    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-3}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-4}
+    # Built from the submodule until tag 4 is published on Docker Hub.
+    build: ./services/player_service
     restart: unless-stopped
     environment:
       PORT: ${PLAYER_PORT:-8081}
@@ -29,6 +31,11 @@ services:
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
       # Registers there on startup, under its own container hostname.
       DISCOVERY_URL: http://discovery:8090
+      # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
+      # which the gateway's GET /logs reads.
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
     # Several copies, so no port is published: they cannot share one on the host.
     # Every request reaches them through the gateway, which takes them in turn.
     deploy:
@@ -62,7 +69,9 @@ services:
   # with replicas because the browser connects to each directly, so each needs
   # its own port on the host; game-2 copies everything else from game.
   game: &game
-    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-3}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-4}
+    # Built from the submodule until tag 4 is published on Docker Hub.
+    build: ./services/game_service
     restart: unless-stopped
     environment: &game-env
       PORT: ${GAME_PORT:-8082}
@@ -88,6 +97,11 @@ services:
       # Also registered, as game-public: where the browser opens the live
       # WebSocket. The gateway hands these out in turn (GET /ws/game).
       PUBLIC_URL: http://localhost:${GAME_PORT:-8082}
+      # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
+      # which the gateway's GET /logs reads.
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
     ports:
       # Published because the live WebSocket goes straight to this service: the
       # gateway only hands out its URL (GET /ws/game).
@@ -309,7 +323,9 @@ services:
 
   discovery:
     # Keeps the list of running service instances; they register on startup.
-    image: ${DOCKERHUB_USERNAME:-fish3008}/service_discovery:${DISCOVERY_SERVICE_TAG:-3}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/service_discovery:${DISCOVERY_SERVICE_TAG:-4}
+    # Built from the submodule until tag 4 is published on Docker Hub.
+    build: ./services/service_discovery
     restart: unless-stopped
     environment:
       # Checked on every call except /health.
@@ -317,6 +333,11 @@ services:
       # Health alerts also go to this Telegram chat; empty means the log only.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
+      # which the gateway's GET /logs reads.
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
     ports:
       # Published for the health check and for reading GET /services by hand.
       - "${DISCOVERY_PORT:-8090}:8090"
@@ -338,6 +359,11 @@ services:
       SERVICE_URL: http://broker:8070
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
+      # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
+      # which the gateway's GET /logs reads.
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
     ports:
       # Published for reading /health and, later, /topics and /dead-letters by hand.
       - "${BROKER_PORT:-8070}:8070"
@@ -351,7 +377,9 @@ services:
 
   gateway:
     # The single point of entry: http://localhost:8080.
-    image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-3}
+    image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-4}
+    # Built from the submodule until tag 4 is published on Docker Hub.
+    build: ./services/gateway_service
     restart: unless-stopped
     environment:
       PLAYER_SERVICE_URL: http://player:${PLAYER_PORT:-8081}
@@ -372,6 +400,10 @@ services:
       # The list of running instances is read from here; a service that is not
       # on it is reached at its fixed URL above.
       DISCOVERY_URL: http://discovery:8090
+      # Its own log file goes here, and GET /logs reads every service's file from here.
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
@@ -409,3 +441,5 @@ volumes:
   world-db-data:
   zombie-db-data:
   resource-db-data:
+  # Log files of gateway, discovery, broker, player and game (GET /logs on the gateway).
+  logs:

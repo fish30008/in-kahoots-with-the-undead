@@ -116,7 +116,9 @@ not issue. If the two values differ, every request after login is `401`.
 3. **Where to.** The first path segment is `game`, so the target is the Game
    Service.
 4. **Forward.** The `Authorization` header and the `access_token` cookie are
-   removed. An `X-Player-Id` header with the id from the token is added.
+   removed. An `X-Player-Id` header with the id from the token is added, and an
+   `X-Request-Id`: the caller's own, or a new one. It is returned to the client
+   too, and both the Gateway and the service log it as `req=` (see Logs).
 5. **Answer.** Whatever the Game Service returns, status and body, goes back to
    the client unchanged.
 
@@ -282,3 +284,27 @@ docker compose up -d
 Then run the collections in `postman/`: they register a player, log in, and send
 every other request through the Gateway with the token. The game collection needs
 `DEMO_SPEEDUP=60` in `.env`, so that a five minute action takes five seconds.
+
+---
+
+## 10. Logs
+
+Gateway, Discovery, Broker, Player and Game write one line shape:
+
+```
+2026-11-07T19:37:50Z INFO  [gateway-proxy] POST /auth/register 201 102ms -> player at http://ff2a06725baa:8081 caller=anonymous req=40fc6785d4b0
+2026-11-07T19:37:50Z INFO  [player-http] POST /auth/register 201 95ms req=40fc6785d4b0
+```
+
+- Time in UTC, level (`INFO`, `WARN`, `ERROR`), `[service-component]`, message.
+- One line per request in the Gateway and one in the service, linked by `req=`.
+  A `500` carries its hidden cause on the service's line as `err="..."`.
+- Not logged: `/health`, routine re-registrations, health rounds that change nothing.
+  An idle system writes nothing.
+- Every line also goes to `/logs/<service>-<hostname>.log` on the shared `logs`
+  volume (`LOG_DIR`), rotated at 5 MB with 3 old files kept.
+
+`GET /logs` on the Gateway, with `X-Internal-Key`, downloads every file merged by
+time, each line prefixed by its instance. Filters: `?service=game`, `?level=WARN`,
+`?contains=req=40fc6785d4b0` (one request through every service), `?lines=5000`.
+The teammates' services are not in these files; their logs stay in `docker compose logs`.
