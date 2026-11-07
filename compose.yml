@@ -326,6 +326,29 @@ services:
       timeout: 3s
       retries: 10
 
+  broker:
+    # The Message Broker (Lab 4). Nothing is routed through it yet.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/broker_service:${BROKER_SERVICE_TAG:-4}
+    # Built from the submodule until tag 4 is published on Docker Hub.
+    build: ./services/broker_service
+    restart: unless-stopped
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY:-changeme}
+      DISCOVERY_URL: http://discovery:8090
+      SERVICE_URL: http://broker:8070
+      TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
+    ports:
+      # Published for reading /health and, later, /topics and /dead-letters by hand.
+      - "${BROKER_PORT:-8070}:8070"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      - discovery
+
   gateway:
     # The single point of entry: http://localhost:8080.
     image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-3}
