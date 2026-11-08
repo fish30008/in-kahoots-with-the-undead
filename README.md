@@ -13,8 +13,8 @@ and holds our services as git submodules.
 
 | Component | Owner | Language | Port | Role |
 |---|---|---|---|---|
-| Gateway | us | Python / FastAPI | 8080 | The door for clients: JWT check, hands each request to the broker's queue for its service, `GET /logs` |
-| Message Broker | us | Python, standard library | 8070 | The door between services: a queue per service, topics, round robin, circuit breakers, one thread per request |
+| Gateway | us | Python / FastAPI | 8080 | The door for clients: JWT check, hands each request to the broker's queue for its service |
+| Message Broker | us | Python, standard library | 8070 | The door between services: a queue per service, topics, load-based balancing, circuit breakers, durable queues, one thread per request, `GET /logs` |
 | Service Discovery | us | Python / FastAPI | 8090 | Registry of running instances and the topics they subscribe to, health checks, Telegram alerts |
 | Player | us | Go / chi | 8081 (2 replicas) | Accounts, login and JWT, XP, items, inventory, trades |
 | Game | us | Go / chi + WebSocket | 8082, 8083 (2 copies) | Sessions, day/night clock, timed actions, zombies |
@@ -121,8 +121,9 @@ Time in UTC, level, `[service-component]`, message. The gateway gives every requ
 the lines of one request across services. Health checks and routine re-registrations
 are not logged.
 
-**Download them:** `GET /logs` on the gateway, with the `X-Internal-Key` header,
-returns one file with every service's lines merged by time:
+**Download them:** `GET /logs` on the broker, with the `X-Internal-Key` header,
+returns one file with every service's lines merged by time. It is on the broker, the
+internal component, because the gateway serves players only:
 
 | Query | Meaning |
 |---|---|
@@ -132,7 +133,7 @@ returns one file with every service's lines merged by time:
 | `lines=5000` | the newest N lines (at most 50000) |
 
 ```bash
-curl -OJ -H "X-Internal-Key: changeme" "http://localhost:8080/logs?level=WARN"
+curl -OJ -H "X-Internal-Key: changeme" "http://localhost:8070/logs?level=WARN"
 ```
 
 ## Postman

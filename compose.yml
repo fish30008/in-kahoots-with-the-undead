@@ -38,7 +38,7 @@ services:
       # broker only; registered with the Service Discovery as <hostname>:9081.
       GRPC_PORT: 9081
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
-      # which the gateway's GET /logs reads.
+      # which the broker's GET /logs reads.
       LOG_DIR: /logs
     volumes:
       - logs:/logs
@@ -108,7 +108,7 @@ services:
       # WebSocket. The gateway hands these out in turn (GET /ws/game).
       PUBLIC_URL: http://localhost:${GAME_PORT:-8082}
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
-      # which the gateway's GET /logs reads.
+      # which the broker's GET /logs reads.
       LOG_DIR: /logs
     volumes:
       - logs:/logs
@@ -346,7 +346,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
-      # which the gateway's GET /logs reads.
+      # which the broker's GET /logs reads.
       LOG_DIR: /logs
     volumes:
       - logs:/logs
@@ -388,7 +388,7 @@ services:
       TASK_TIMEOUT: ${TASK_TIMEOUT:-30}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
-      # which the gateway's GET /logs reads.
+      # which the broker's GET /logs reads.
       LOG_DIR: /logs
       # Durable queues and the dead letter channel: SQLite on the broker-data volume.
       DATA_DIR: /data
@@ -427,7 +427,7 @@ services:
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-100}
       # Registers itself there, so its health and load are checked.
       DISCOVERY_URL: http://discovery:8090
-      # Its own log file goes here, and GET /logs reads every service's file from here.
+      # Its own log file goes here, on the volume the broker's GET /logs reads.
       LOG_DIR: /logs
     volumes:
       - logs:/logs
@@ -527,7 +527,7 @@ volumes:
   world-db-data:
   zombie-db-data:
   resource-db-data:
-  # Log files of gateway, discovery, broker, player and game (GET /logs on the gateway).
+  # Log files of gateway, discovery, broker, player and game (GET /logs on the broker).
   logs:
   # The broker's durable queues and dead letters.
   broker-data:

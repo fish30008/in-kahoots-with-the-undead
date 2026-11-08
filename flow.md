@@ -63,7 +63,7 @@ WebSocket, for the teammates' services). Section 6 covers that.
 
 | Piece | Language | Port | Job |
 | --- | --- | --- | --- |
-| Gateway | Python, FastAPI | 8080 | Checks who is calling, picks the service, puts the request on the broker's queue for it, enforces limits, serves `GET /logs`. No database. |
+| Gateway | Python, FastAPI | 8080 | Checks who is calling, picks the service, puts the request on the broker's queue for it, enforces limits. No database. |
 | Message Broker | Python, standard library | 8070 | One queue per service, topics, round robin over the instances, circuit breakers, one thread per request. No database (yet). |
 | Player Service | Go, chi | 8081 | Accounts, login, XP and level, inventory, item catalog, trades. Issues the access token. Publishes `player.registered` and `player.leveled_up`. |
 | Game Service | Go, chi | 8082 | Sessions, actions, zombies, the day/night tick loop, the live WebSocket. Publishes `game.action_completed`. |
@@ -374,7 +374,7 @@ Gateway, Discovery, Broker, Player and Game write one line shape:
 - Every line also goes to `/logs/<service>-<hostname>.log` on the shared `logs`
   volume (`LOG_DIR`), rotated at 5 MB with 3 old files kept.
 
-`GET /logs` on the Gateway, with `X-Internal-Key`, downloads every file merged by
+`GET /logs` on the broker (`localhost:8070/logs`), with `X-Internal-Key`, downloads every file merged by
 time, each line prefixed by its instance. Filters: `?service=game`, `?level=WARN`,
 `?contains=req=40fc6785d4b0` (one request through every service), `?lines=5000`.
 The teammates' services are not in these files; their logs stay in `docker compose logs`,

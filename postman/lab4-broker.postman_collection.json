@@ -86,7 +86,7 @@
       ]
     },
     {
-      "name": "2. Logs: GET /logs on the gateway",
+      "name": "2. Logs: GET /logs on the broker",
       "item": [
         {
           "name": "Without the key: 401",
@@ -105,7 +105,7 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": "{{gatewayUrl}}/logs"
+            "url": "{{brokerUrl}}/logs"
           }
         },
         {
@@ -129,7 +129,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?level=LOUD"
+            "url": "{{brokerUrl}}/logs?level=LOUD"
           }
         },
         {
@@ -238,7 +238,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?lines=500"
+            "url": "{{brokerUrl}}/logs?lines=500"
           }
         },
         {
@@ -268,7 +268,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?contains=req={{requestId}}"
+            "url": "{{brokerUrl}}/logs?contains=req={{requestId}}"
           }
         },
         {
@@ -295,7 +295,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?service=game&lines=100"
+            "url": "{{brokerUrl}}/logs?service=game&lines=100"
           }
         },
         {
@@ -321,7 +321,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?level=WARN"
+            "url": "{{brokerUrl}}/logs?level=WARN"
           }
         }
       ]
@@ -692,7 +692,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?contains=player.leveled_up"
+            "url": "{{brokerUrl}}/logs?contains=player.leveled_up"
           }
         },
         {
@@ -829,7 +829,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?contains=/player.Player/"
+            "url": "{{brokerUrl}}/logs?contains=/player.Player/"
           }
         },
         {
@@ -856,7 +856,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{gatewayUrl}}/logs?contains=player.leveled_up"
+            "url": "{{brokerUrl}}/logs?contains=player.leveled_up"
           }
         },
         {
@@ -996,6 +996,66 @@
               }
             ],
             "url": "{{gatewayUrl}}/world/spawn-points"
+          }
+        },
+        {
+          "name": "Closed on the gateway: GET /logs moved to the broker (developers only)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 on the gateway, even with the key', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/logs"
+          }
+        },
+        {
+          "name": "Closed on the gateway: no API description (/docs, /openapi.json)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('not served: the request is forwarded and no service has it', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/openapi.json"
           }
         },
         {
@@ -1401,6 +1461,16 @@
           "name": "Loki has the logs of every container, the teammates' too",
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Loki lists labels of the last hour by default; a quiet service may have logged earlier",
+                  "pm.collectionVariables.set('lokiStart', String((Date.now() - 6 * 3600 * 1000) * 1000000));"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -1415,7 +1485,7 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/label/service/values"
+            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/label/service/values?start={{lokiStart}}"
           }
         },
         {
@@ -1503,6 +1573,10 @@
     },
     {
       "key": "deadId",
+      "value": ""
+    },
+    {
+      "key": "lokiStart",
       "value": ""
     }
   ]

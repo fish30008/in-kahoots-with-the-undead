@@ -6,7 +6,7 @@ flowchart TB
 
     client(["<b>Game client</b> · browser · nginx on :3000, /api proxied to the gateway"])
 
-    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
+    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/>X-Request-Id on every request"]
 
     broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>load-based</b>: fewest calls in progress · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered<br/><b>rerouting</b>: a failed call goes to another copy · <b>durable queues</b> in SQLite (broker-data) · <b>dead letter channel</b>: GET /dead-letters"]
 
@@ -56,7 +56,7 @@ flowchart TB
     gamecopies == "POST /register every 15 s<br/>GET /health every 10 s" ==> discovery
     gateway == "POST /register every 15 s" ==> discovery
     broker == "GET /services, /grpc, /subscriptions every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
-    gateway -- "GET /logs reads every file" --> logs
+    broker -- "GET /logs (X-Internal-Key): every file merged by time" --> logs
     discovery -- "alerts" --> telegram
 
     %% monitoring
