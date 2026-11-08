@@ -59,7 +59,36 @@ player  -> gRPC events.Broker/Publish          -> events.Consumer/Deliver on eve
   `/health` shows queue depths and threads.
 
 Details: [services/broker_service/README.md](services/broker_service/README.md),
-[flow.md](flow.md) sections 3, 4 and 6.
+[flow.md](flow.md) sections 3, 4, 6 and 11.
+
+## Reliability and monitoring
+
+**Durable queues.** Every event is stored by the broker (SQLite on the
+`broker-data` volume) before the producer is answered, one copy per subscribing
+service, and deleted only when the subscriber acknowledged it: at-least-once,
+and nothing is lost when the broker restarts. Subscriptions are durable: when
+every Game copy is down, its `player.leveled_up` events wait and go out when one
+is back.
+
+**Dead letter channel.** An event goes there when its subscriber rejects it as
+invalid, after 5 failed deliveries (backoff 1, 2, 4, 8 s), or when undelivered
+after an hour. `GET localhost:8070/dead-letters` (with `X-Internal-Key`) lists
+them with the reason; `POST /dead-letters/<id>/retry` sends one again.
+
+**High availability and load.** The broker sends each message to the instance with
+the fewest calls in progress, and reroutes it to another instance when the one it
+chose is down or its breaker tripped (a POST only when it never reached the first).
+Stop a Player copy in the middle of a run: no client sees an error.
+
+**Monitoring.** `docker compose up` also starts:
+
+| | Where | What |
+|---|---|---|
+| Grafana | `http://localhost:3001` (no login; `admin`/`admin` to edit) | the *In Kahoots with the Undead* dashboard: instances up, requests and errors per service, latency, broker load per instance, queues, reroutes and breaker trips, events per topic, dead letters, game activity, and the logs |
+| Prometheus | `http://localhost:9090` | scrapes `/metrics` on port 9100 of every instance of our five services; which instances exist it asks our Service Discovery (`GET /prometheus`) |
+| Loki + Alloy | inside Docker | Alloy reads every container's output (the teammates' too) through the Docker socket and sends it to Loki; our `[service-component]` tag and level become labels |
+
+Metrics ports are not published: players cannot read them.
 
 ## Running it
 
@@ -70,11 +99,12 @@ docker compose up -d --build
 
 - Gateway `http://localhost:8080`, client `http://localhost:3000`
 - Broker `http://localhost:8070/health`, Discovery `http://localhost:8090/health`
+- Grafana `http://localhost:3001`, Prometheus `http://localhost:9090`
 - `DEMO_SPEEDUP=60` in `.env` makes timed actions and day/night take seconds.
 
 Our five images are built from the submodules (`services/*`) until tag `4` is
 published on Docker Hub (`fish3008/<repo>:4`). `docker compose down -v` also drops
-the databases and the log volume.
+the databases, the log volume and the broker's stored events.
 
 ## Logs
 
@@ -114,7 +144,8 @@ Run against the whole stack, in Postman or with `npx newman run postman/<file>`:
   (set `DEMO_SPEEDUP=60`)
 - `lab3-scaling.postman_collection.json`: Discovery, round robin, circuit breaker, alerts
 - `lab4-broker.postman_collection.json`: the broker's queues and topics (an event end to
-  end), and `GET /logs` following one request through gateway, broker and service
+  end), `GET /logs` following one request through gateway, broker and service, gRPC and
+  the closed gateway, dead letters, and Prometheus / Grafana / Loki
 
 ## Documentation
 

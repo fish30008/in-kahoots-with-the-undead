@@ -390,10 +390,17 @@ services:
       # Logs also go to /logs/<service>-<hostname>.log on the shared logs volume,
       # which the gateway's GET /logs reads.
       LOG_DIR: /logs
+      # Durable queues and the dead letter channel: SQLite on the broker-data volume.
+      DATA_DIR: /data
+      # Undelivered events go to the dead letter channel after this many failed
+      # deliveries, or after this many seconds.
+      MAX_ATTEMPTS: ${BROKER_MAX_ATTEMPTS:-5}
+      MESSAGE_TTL: ${BROKER_MESSAGE_TTL:-3600}
     volumes:
       - logs:/logs
+      - broker-data:/data
     ports:
-      # Published for reading /health and, later, /topics and /dead-letters by hand.
+      # Published for reading /health, /topics and /dead-letters by hand.
       - "${BROKER_PORT:-8070}:8070"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/health')"]
@@ -453,6 +460,64 @@ services:
     depends_on:
       - gateway
 
+  # --- Monitoring (Lab 4): Prometheus + Loki + Grafana -------------------------
+  # Every one of our services serves /metrics on port 9100, which is not published.
+  # Prometheus asks our Service Discovery which instances exist (GET /prometheus).
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - discovery
+
+  # Keeps the logs of every container.
+  loki:
+    image: grafana/loki:3.5.3
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+
+  # Ships every container's output to Loki, reading the Docker socket; the level and
+  # [service-component] tag of our lines become labels.
+  alloy:
+    image: grafana/alloy:v1.10.2
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  # http://localhost:3001: the dashboard opens without logging in; admin/admin to edit.
+  grafana:
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/kahoots.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   player-db-data:
   game-db-data:
@@ -464,3 +529,5 @@ volumes:
   resource-db-data:
   # Log files of gateway, discovery, broker, player and game (GET /logs on the gateway).
   logs:
+  # The broker's durable queues and dead letters.
+  broker-data:

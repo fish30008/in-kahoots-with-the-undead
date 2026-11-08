@@ -8,7 +8,7 @@ flowchart TB
 
     gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/><b>GET /logs</b> (X-Internal-Key): every service's log file merged by time · ?service ?level ?contains ?lines · X-Request-Id on every request"]
 
-    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>round robin</b> over the copies in Discovery · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered"]
+    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>load-based</b>: fewest calls in progress · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered<br/><b>rerouting</b>: a failed call goes to another copy · <b>durable queues</b> in SQLite (broker-data) · <b>dead letter channel</b>: GET /dead-letters"]
 
     subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db"]
         direction LR
@@ -44,8 +44,8 @@ flowchart TB
 
     %% every request through the broker
     gateway -- "/queues/&lt;service&gt;/… · every client request" --> broker
-    broker -- "player queue (REST) · player.Player and events.Consumer (gRPC) · round robin" --> playercopies
-    broker -- "game queue (REST) · events.Consumer (gRPC) · round robin" --> gamecopies
+    broker -- "player queue (REST) · player.Player and events.Consumer (gRPC) · least loaded" --> playercopies
+    broker -- "game queue (REST) · events.Consumer (gRPC) · least loaded" --> gamecopies
     broker -- "exam, world, zombie, resource, base, crafting queues" --> team
     gamecopies == "gRPC player.Player/* · events.Broker/Publish<br/>REST /world · internal key" ==> broker
     playercopies == "gRPC events.Broker/Publish:<br/>player.registered, player.leveled_up" ==> broker
@@ -58,6 +58,19 @@ flowchart TB
     broker == "GET /services, /grpc, /subscriptions every 5 s<br/>POST /deregister on a breaker trip" ==> discovery
     gateway -- "GET /logs reads every file" --> logs
     discovery -- "alerts" --> telegram
+
+    %% monitoring
+    subgraph monitoring["Monitoring · docker compose"]
+        direction LR
+        prometheus["<b>Prometheus</b> · :9090<br/>scrapes /metrics on :9100 of every copy"]
+        alloy["<b>Alloy</b><br/>every container's output,<br/>via the Docker socket"]
+        loki["<b>Loki</b><br/>logs, labels: service, level, tag"]
+        grafana["<b>Grafana</b> · :3001<br/>one dashboard: metrics + logs"]
+    end
+    prometheus -- "GET /prometheus: what to scrape" --> discovery
+    alloy --> loki
+    grafana --> prometheus
+    grafana --> loki
 
     %% events for the teammates' services (/events WebSockets, URL negotiated with the broker)
     playercopies -. "player.registered<br/>player.leveled_up" .-> team
@@ -76,8 +89,9 @@ flowchart TB
     class player1,player2,game1,game2 mineGo
     class base,crafting go
     class exam,world,zombie,resource ts
-    class client,telegram,logs ext
+    class client,telegram,logs,prometheus,alloy,loki,grafana ext
     class legend note
     style playercopies fill:#f0fdf4,stroke:#15803d
     style gamecopies fill:#f0fdf4,stroke:#15803d
     style team fill:#fffbeb,stroke:#d97706
+    style monitoring fill:#f9fafb,stroke:#6b7280

@@ -1,0 +1,51 @@
+// Grafana Alloy ships the output of every container (the teammates' too) to Loki.
+// It reads the Docker socket, so a container that starts later is picked up.
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Labels every stream gets: the compose service (player, broker, exam, ...) and the
+// container (in-kahoots-with-the-undead-player-1, ...).
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.process.our_format.receiver]
+}
+
+// Our services write "<time> <LEVEL> [<service>-<component>] message": the level and
+// the tag become labels, so Grafana can filter on them. Other lines pass unchanged.
+loki.process "our_format" {
+  stage.regex {
+    // a raw string (backticks), so the backslashes reach the regex as they are
+    expression = `^\S+ (?P<level>DEBUG|INFO|WARN|ERROR)\s+\[(?P<tag>[a-z]+-[a-z]+)\]`
+  }
+  stage.labels {
+    values = {
+      level = "",
+      tag   = "",
+    }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

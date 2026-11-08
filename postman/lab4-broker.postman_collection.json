@@ -215,7 +215,8 @@
                 "exec": [
                   "pm.test('200', () => pm.response.to.have.status(200));",
                   "pm.test('sent as a file', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.match(/^attachment; filename=\"logs-all-.*\\.log\"$/));",
-                  "const lines = pm.response.text().trim().split('\\n');",
+                  "// a traceback's own lines carry no time: they follow the line they belong to",
+                  "const lines = pm.response.text().trim().split('\\n').filter(l => /^[a-z-]+-[0-9a-f]+ \\| \\d{4}-/.test(l));",
                   "pm.test('every line: instance | time LEVEL [service-component] message', () => {",
                   "    lines.forEach(l => pm.expect(l).to.match(/^[a-z-]+-[0-9a-f]+ \\| \\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ (INFO |WARN |ERROR|DEBUG) \\[[a-z]+-[a-z]+\\] /));",
                   "});",
@@ -744,7 +745,7 @@
                   "    pm.expect(byName['player.leveled_up'].published).to.be.at.least(1);",
                   "    pm.expect(byName['player.leveled_up'].delivered).to.be.at.least(1);",
                   "});",
-                  "pm.test('every entry has its counts', () => topics.forEach(t => pm.expect(t).to.have.all.keys('topic', 'subscribers', 'published', 'delivered', 'lost')));"
+                  "pm.test('every entry has its counts', () => topics.forEach(t => pm.expect(t).to.have.all.keys('topic', 'subscribers', 'published', 'delivered', 'waiting', 'dead')));"
                 ]
               }
             }
@@ -1092,6 +1093,351 @@
           }
         }
       ]
+    },
+    {
+      "name": "5. Durable queues, dead letters, monitoring",
+      "item": [
+        {
+          "name": "Dead letters need the key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/dead-letters"
+          }
+        },
+        {
+          "name": "Publish an event game cannot read (player.leveled_up without a player)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('badEventId', require('uuid').v4());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202: the broker stored it for game', () => pm.response.to.have.status(202));",
+                  "pm.test('game subscribes durably', () => pm.expect(pm.response.json().subscribers).to.include('game'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/topics/player.leveled_up",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{badEventId}}\",\n  \"type\": \"player.leveled_up\",\n  \"version\": 1,\n  \"payload\": \"not an object\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Game rejected it: it is in the dead letter channel",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const letter = pm.response.json().deadLetters.find(d => d.eventId === pm.collectionVariables.get('badEventId'));",
+                  "pm.test('the event is there', () => pm.expect(letter).to.be.an('object'));",
+                  "pm.test('rejected at once, no retries wasted', () => { pm.expect(letter.reason).to.eql('rejected'); pm.expect(letter.attempts).to.eql(0); });",
+                  "pm.test('with the error game gave', () => pm.expect(letter.lastError).to.include('INVALID_ARGUMENT'));",
+                  "pm.test('for subscriber game', () => pm.expect(letter.subscriber).to.eql('game'));",
+                  "pm.collectionVariables.set('deadId', letter.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters?topic=player.leveled_up"
+          }
+        },
+        {
+          "name": "Put the dead letter back on its queue",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters/{{deadId}}/retry"
+          }
+        },
+        {
+          "name": "Retried, rejected again: a new dead letter for the same event",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const letters = pm.response.json().deadLetters.filter(d => d.eventId === pm.collectionVariables.get('badEventId'));",
+                  "pm.test('one dead letter for it, a new one', () => { pm.expect(letters.length).to.eql(1); pm.expect(letters[0].id).to.not.eql(pm.collectionVariables.get('deadId')); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters?topic=player.leveled_up"
+          }
+        },
+        {
+          "name": "GET /topics counts waiting and dead events",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const t = pm.response.json().topics.find(x => x.topic === 'player.leveled_up');",
+                  "pm.test('the dead one is counted', () => pm.expect(t.dead).to.be.at.least(1));",
+                  "pm.test('nothing left waiting', () => pm.expect(t.waiting).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/topics"
+          }
+        },
+        {
+          "name": "Unknown dead letter: 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters/999999999/retry"
+          }
+        },
+        {
+          "name": "Load-based balancing: every player copy carries load",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('the broker has sent calls to both player copies', () => pm.expect(pm.response.json().data.result.length).to.be.at.least(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/query?query=count by (target) (broker_instance_in_flight{service=\"player\"})"
+          }
+        },
+        {
+          "name": "Prometheus scrapes every instance, found through the Service Discovery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const targets = pm.response.json().data.activeTargets;",
+                  "const apps = targets.map(t => t.labels.app);",
+                  "pm.test('our five services are scraped', () => ['gateway', 'broker', 'player', 'game', 'discovery'].forEach(a => pm.expect(apps).to.include(a)));",
+                  "pm.test('both player copies and both game copies', () => { pm.expect(apps.filter(a => a === 'player').length).to.be.at.least(2); pm.expect(apps.filter(a => a === 'game').length).to.be.at.least(2); });",
+                  "pm.test('all of them up', () => targets.forEach(t => pm.expect(t.health, t.scrapeUrl).to.eql('up')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/targets?state=active"
+          }
+        },
+        {
+          "name": "The dead letters show in Prometheus",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 6000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('at least the one of this folder', () => pm.expect(Number(pm.response.json().data.result[0].value[1])).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/query?query=sum(broker_dead_letters)"
+          }
+        },
+        {
+          "name": "Grafana is up, with the dashboard",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, without logging in', () => pm.response.to.have.status(200));",
+                  "pm.test('the dashboard', () => pm.expect(pm.response.json().dashboard.title).to.eql('In Kahoots with the Undead'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/dashboards/uid/kahoots"
+          }
+        },
+        {
+          "name": "Loki has the logs of every container, the teammates' too",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const services = pm.response.json().data;",
+                  "pm.test('ours and theirs', () => ['gateway', 'broker', 'player', 'game', 'exam', 'world', 'zombie', 'resource'].forEach(s => pm.expect(services).to.include(s)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/label/service/values"
+          }
+        },
+        {
+          "name": "Loki knows our levels: the WARN and ERROR lines",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('levels parsed from our log format', () => pm.expect(pm.response.json().data).to.include.members(['INFO', 'WARN', 'ERROR']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/label/level/values"
+          }
+        }
+      ]
     }
   ],
   "variable": [
@@ -1141,6 +1487,22 @@
     },
     {
       "key": "token",
+      "value": ""
+    },
+    {
+      "key": "prometheusUrl",
+      "value": "http://localhost:9090"
+    },
+    {
+      "key": "grafanaUrl",
+      "value": "http://localhost:3001"
+    },
+    {
+      "key": "badEventId",
+      "value": ""
+    },
+    {
+      "key": "deadId",
       "value": ""
     }
   ]

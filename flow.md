@@ -377,4 +377,42 @@ Gateway, Discovery, Broker, Player and Game write one line shape:
 `GET /logs` on the Gateway, with `X-Internal-Key`, downloads every file merged by
 time, each line prefixed by its instance. Filters: `?service=game`, `?level=WARN`,
 `?contains=req=40fc6785d4b0` (one request through every service), `?lines=5000`.
-The teammates' services are not in these files; their logs stay in `docker compose logs`.
+The teammates' services are not in these files; their logs stay in `docker compose logs`,
+and every container's logs are in Loki (section 11).
+
+---
+
+## 11. When things fail, and watching it
+
+**An instance dies.** The broker picks the instance with the fewest calls in
+progress. If that one is unreachable, the same message goes to another instance
+at once (`rerouted from X to Y` in the broker's log); after three failures its
+breaker trips and it leaves the rotation. A GET is also rerouted after a timeout
+or a 5xx; a POST is not, because it may already have done its work.
+
+```
+gateway -> broker: POST /queues/player/auth/login
+           broker -> player-1   connection refused  (never reached: safe to resend)
+           broker -> player-2   200                 -> the client sees 200
+```
+
+**A subscriber is down.** Events are stored before the producer is answered and
+deleted after the subscriber's acknowledgement:
+
+```
+Player --Publish(player.leveled_up)--> broker: stored for game (SQLite)  <- answered
+                                       game down: waits, nothing counted
+                                       broker restarts: still stored
+                                       game back: Deliver -> OK -> deleted
+```
+
+**An event cannot be delivered.** Rejected as invalid, 5 failed deliveries, or one
+hour undelivered: it moves to the dead letter channel, `GET /dead-letters` on the
+broker, from where `POST /dead-letters/<id>/retry` sends it again.
+
+**Watching it.** Grafana on `http://localhost:3001` shows the metrics Prometheus
+scrapes from every instance (found through the Service Discovery) and the logs
+Loki keeps of every container. A demo: open the dashboard, run the game
+collection, `docker kill` one Player copy: the reroutes and the breaker trip show
+in the broker panels, the load moves to the other copy, and the WARN/ERROR lines
+appear in the logs panel.
