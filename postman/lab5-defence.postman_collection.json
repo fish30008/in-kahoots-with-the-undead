@@ -1,0 +1,543 @@
+{
+  "info": {
+    "name": "Lab 5: defence",
+    "description": "One folder per grade, against the whole stack (docker compose up -d). Run folder 0 first: it creates the player and token the others use. After it, each folder runs on its own.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "gatewayUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "grafanaUrl",
+      "value": "http://localhost:3001"
+    },
+    {
+      "key": "password",
+      "value": "hunter2hunter2"
+    },
+    {
+      "key": "user",
+      "value": ""
+    },
+    {
+      "key": "playerId",
+      "value": ""
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "sessionId",
+      "value": ""
+    },
+    {
+      "key": "replicatedUser",
+      "value": ""
+    },
+    {
+      "key": "replicatedId",
+      "value": ""
+    },
+    {
+      "key": "tries",
+      "value": "0"
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Setup: a player and a token",
+      "item": [
+        {
+          "name": "Register a player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{user}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('user', 'lab5_' + Date.now());",
+                  "pm.collectionVariables.set('tries', 0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201: the player is created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('playerId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log in",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{user}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 and a token', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().access_token).to.be.a('string'); });",
+                  "pm.collectionVariables.set('token', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Grade 4: Data Warehouse and ETL",
+      "item": [
+        {
+          "name": "The ETL job runs: its last run is ok",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{grafanaUrl}}/api/ds/query",
+            "description": "Asked through Grafana's Warehouse data source, so no database port or password is needed.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from\": \"now-1h\",\n  \"to\": \"now\",\n  \"queries\": [\n    {\n      \"refId\": \"A\",\n      \"datasource\": {\n        \"uid\": \"warehouse\"\n      },\n      \"rawSql\": \"SELECT status, players, sessions, actions, EXTRACT(EPOCH FROM NOW() - finished_at)::int AS age_seconds FROM etl_runs ORDER BY id DESC LIMIT 1\",\n      \"format\": \"table\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const frame = pm.response.json().results.A.frames[0];",
+                  "const names = frame.schema.fields.map(f => f.name);",
+                  "const cols = frame.data.values;",
+                  "const rows = (cols[0] || []).map((_, i) => Object.fromEntries(names.map((n, c) => [n, cols[c][i]])));",
+                  "pm.test('etl_runs has a run', () => pm.expect(rows.length).to.equal(1));",
+                  "pm.test('the last run is ok', () => pm.expect(rows[0].status).to.equal('ok'));",
+                  "pm.test('it finished less than a minute ago', () => pm.expect(rows[0].age_seconds).to.be.below(60));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Extract + load: the new player reached dim_player",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{grafanaUrl}}/api/ds/query",
+            "description": "Player Service database -> stg_players -> dim_player. Repeats itself until the next ETL run has happened.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from\": \"now-1h\",\n  \"to\": \"now\",\n  \"queries\": [\n    {\n      \"refId\": \"A\",\n      \"datasource\": {\n        \"uid\": \"warehouse\"\n      },\n      \"rawSql\": \"SELECT player_id, username, level, xp FROM dim_player WHERE player_id = {{playerId}}\",\n      \"format\": \"table\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const frame = pm.response.json().results.A.frames[0];",
+                  "const names = frame.schema.fields.map(f => f.name);",
+                  "const cols = frame.data.values;",
+                  "const rows = (cols[0] || []).map((_, i) => Object.fromEntries(names.map((n, c) => [n, cols[c][i]])));",
+                  "// the ETL job runs every 10 s: ask again, up to 8 times, until the row is there",
+                  "const tries = Number(pm.collectionVariables.get('tries') || 0);",
+                  "if (rows.length === 0 && tries < 8) {",
+                  "    pm.collectionVariables.set('tries', tries + 1);",
+                  "    setTimeout(() => {}, 3000);",
+                  "    postman.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('tries', 0);",
+                  "pm.test('the player registered in Setup is in the warehouse', () => pm.expect(rows.length).to.equal(1));",
+                  "pm.test('with its username, level 1 and 0 xp', () => { pm.expect(rows[0].username).to.equal(pm.collectionVariables.get('user')); pm.expect(rows[0].level).to.equal(1); pm.expect(rows[0].xp).to.equal(0); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Nothing private was copied: no password or email column",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{grafanaUrl}}/api/ds/query",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from\": \"now-1h\",\n  \"to\": \"now\",\n  \"queries\": [\n    {\n      \"refId\": \"A\",\n      \"datasource\": {\n        \"uid\": \"warehouse\"\n      },\n      \"rawSql\": \"SELECT table_name || '.' || column_name AS column_name FROM information_schema.columns WHERE table_name IN ('dim_player', 'stg_players')\",\n      \"format\": \"table\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const frame = pm.response.json().results.A.frames[0];",
+                  "const names = frame.schema.fields.map(f => f.name);",
+                  "const cols = frame.data.values;",
+                  "const rows = (cols[0] || []).map((_, i) => Object.fromEntries(names.map((n, c) => [n, cols[c][i]])));",
+                  "const columns = rows.map(r => r.column_name);",
+                  "pm.test('dim_player and stg_players have columns', () => pm.expect(columns.length).to.be.above(5));",
+                  "pm.test('none of them is a password or an email', () => pm.expect(columns.filter(c => /password|email/.test(c))).to.eql([]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create a session (a row for the Game side)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"lab5 warehouse\",\n  \"host_player_id\": {{playerId}}\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201: the session is created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('sessionId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Transform: the session reached fact_session, players counted",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{grafanaUrl}}/api/ds/query",
+            "description": "Game Service database -> stg_sessions + stg_members -> fact_session. `players` and `created_day` do not exist in the source: the transform derives them.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from\": \"now-1h\",\n  \"to\": \"now\",\n  \"queries\": [\n    {\n      \"refId\": \"A\",\n      \"datasource\": {\n        \"uid\": \"warehouse\"\n      },\n      \"rawSql\": \"SELECT status, players, created_day::text AS created_day FROM fact_session WHERE session_id = '{{sessionId}}'\",\n      \"format\": \"table\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const frame = pm.response.json().results.A.frames[0];",
+                  "const names = frame.schema.fields.map(f => f.name);",
+                  "const cols = frame.data.values;",
+                  "const rows = (cols[0] || []).map((_, i) => Object.fromEntries(names.map((n, c) => [n, cols[c][i]])));",
+                  "// the ETL job runs every 10 s: ask again, up to 8 times, until the row is there",
+                  "const tries = Number(pm.collectionVariables.get('tries') || 0);",
+                  "if (rows.length === 0 && tries < 8) {",
+                  "    pm.collectionVariables.set('tries', tries + 1);",
+                  "    setTimeout(() => {}, 3000);",
+                  "    postman.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('tries', 0);",
+                  "pm.test('the session is in the warehouse', () => pm.expect(rows.length).to.equal(1));",
+                  "pm.test('status active, 1 player (counted from the members), day column filled', () => { pm.expect(rows[0].status).to.equal('active'); pm.expect(rows[0].players).to.equal(1); pm.expect(rows[0].created_day).to.be.a('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete the session in the Game Service",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204: gone from the Game Service', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "History: the deleted session is still in the warehouse",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{grafanaUrl}}/api/ds/query",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from\": \"now-1h\",\n  \"to\": \"now\",\n  \"queries\": [\n    {\n      \"refId\": \"A\",\n      \"datasource\": {\n        \"uid\": \"warehouse\"\n      },\n      \"rawSql\": \"SELECT session_id FROM fact_session WHERE session_id = '{{sessionId}}'\",\n      \"format\": \"table\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const frame = pm.response.json().results.A.frames[0];",
+                  "const names = frame.schema.fields.map(f => f.name);",
+                  "const cols = frame.data.values;",
+                  "const rows = (cols[0] || []).map((_, i) => Object.fromEntries(names.map((n, c) => [n, cols[c][i]])));",
+                  "pm.test('fact_session still has it', () => pm.expect(rows.length).to.equal(1));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Grade 5: database replication and failover",
+      "item": [
+        {
+          "name": "Write: register a player (goes to the primary)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "description": "The Player Service has all three database nodes in its URL and keeps the one that accepts writes.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{replicatedUser}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('replicatedUser', 'lab5_repl_' + Date.now());",
+                  "pm.collectionVariables.set('tries', 0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201: the write was accepted', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('replicatedId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read it back through the service",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{replicatedId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200: the player is there', () => pm.response.to.have.status(200));",
+                  "pm.test('same username', () => pm.expect(pm.response.json().username).to.equal(pm.collectionVariables.get('replicatedUser')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replicated: the row is on a replica (the ETL job reads replicas)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{grafanaUrl}}/api/ds/query",
+            "description": "The ETL job connects with target_session_attrs=prefer-standby, so what it loads was read from a replica: the write made on the primary was streamed there.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from\": \"now-1h\",\n  \"to\": \"now\",\n  \"queries\": [\n    {\n      \"refId\": \"A\",\n      \"datasource\": {\n        \"uid\": \"warehouse\"\n      },\n      \"rawSql\": \"SELECT player_id FROM dim_player WHERE player_id = {{replicatedId}}\",\n      \"format\": \"table\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const frame = pm.response.json().results.A.frames[0];",
+                  "const names = frame.schema.fields.map(f => f.name);",
+                  "const cols = frame.data.values;",
+                  "const rows = (cols[0] || []).map((_, i) => Object.fromEntries(names.map((n, c) => [n, cols[c][i]])));",
+                  "// the ETL job runs every 10 s: ask again, up to 8 times, until the row is there",
+                  "const tries = Number(pm.collectionVariables.get('tries') || 0);",
+                  "if (rows.length === 0 && tries < 8) {",
+                  "    pm.collectionVariables.set('tries', tries + 1);",
+                  "    setTimeout(() => {}, 3000);",
+                  "    postman.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('tries', 0);",
+                  "pm.test('the player came out of a replica into the warehouse', () => pm.expect(rows.length).to.equal(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Write to the Game database too: create a session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"lab5 replication\",\n  \"host_player_id\": {{playerId}}\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201: the write was accepted', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('sessionId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read it back, then clean up",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}",
+            "description": "Failover: `docker stop in-kahoots-with-the-undead-player-db-0-1` (or Test-Failover in lab5-tests.ps1), wait about 30 s, run this folder again: every request still passes, on the promoted node."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204: found and deleted', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

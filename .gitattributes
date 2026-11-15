@@ -1,2 +1,3 @@
 # Run inside a Linux container: CRLF would break the shebang.
 etl/*.sh text eol=lf
+db/replication/*.sh text eol=lf

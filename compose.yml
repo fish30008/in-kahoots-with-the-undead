@@ -1,18 +1,80 @@
+# What every node of a replicated database (Lab 5) has in common.
+x-repmgr: &repmgr
+  image: bitnamilegacy/postgresql-repmgr:${REPMGR_TAG:-17.6.0-debian-12-r2}
+  restart: unless-stopped
+  # A guard against two primaries, then the image's own start: a node that comes
+  # back waits until its partners agree on who the primary is.
+  entrypoint: ["/bin/bash", "/replication/start.sh"]
+  healthcheck:
+    # $$ leaves the variable for the container's shell: each cluster has its own user.
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRESQL_USERNAME -d $$POSTGRESQL_DATABASE"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+    start_period: 30s
+
+x-player-db-env: &player-db-env
+  POSTGRESQL_POSTGRES_PASSWORD: ${PLAYER_POSTGRES_PASSWORD:-qwerty}
+  POSTGRESQL_USERNAME: ${PLAYER_POSTGRES_USER:-postgres}
+  POSTGRESQL_PASSWORD: ${PLAYER_POSTGRES_PASSWORD:-qwerty}
+  POSTGRESQL_DATABASE: ${PLAYER_POSTGRES_DB:-player}
+  REPMGR_PASSWORD: ${REPMGR_PASSWORD:-repmgr}
+  # Who is primary on the very first start; afterwards the nodes ask each other.
+  REPMGR_PRIMARY_HOST: player-db-0
+  REPMGR_PARTNER_NODES: player-db-0,player-db-1,player-db-2
+  # A replica gives the primary 3 tries, 3 s apart, before it is replaced.
+  REPMGR_RECONNECT_ATTEMPTS: 3
+  REPMGR_RECONNECT_INTERVAL: 3
+
+x-game-db-env: &game-db-env
+  POSTGRESQL_POSTGRES_PASSWORD: ${GAME_POSTGRES_PASSWORD:-qwerty}
+  POSTGRESQL_USERNAME: ${GAME_POSTGRES_USER:-game}
+  POSTGRESQL_PASSWORD: ${GAME_POSTGRES_PASSWORD:-qwerty}
+  POSTGRESQL_DATABASE: ${GAME_POSTGRES_DB:-game_service}
+  REPMGR_PASSWORD: ${REPMGR_PASSWORD:-repmgr}
+  REPMGR_PRIMARY_HOST: game-db-0
+  REPMGR_PARTNER_NODES: game-db-0,game-db-1,game-db-2
+  REPMGR_RECONNECT_ATTEMPTS: 3
+  REPMGR_RECONNECT_INTERVAL: 3
+
 services:
-  player-db:
-    image: postgres:16-alpine
-    restart: unless-stopped
+  # --- player-db (Lab 5): one primary and two replicas, streaming replication. ---
+  # repmgr runs in every node: when the primary stops answering, the replicas agree
+  # on one of them, promote it, and the other follows it. A stopped primary that is
+  # started again finds the new primary through its partners and joins as a replica.
+  # The Player Service is given all three hosts and keeps the one that takes writes.
+  player-db-0:
+    <<: *repmgr
     environment:
-      POSTGRES_USER: ${PLAYER_POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${PLAYER_POSTGRES_PASSWORD:-qwerty}
-      POSTGRES_DB: ${PLAYER_POSTGRES_DB:-player}
+      <<: *player-db-env
+      REPMGR_NODE_NAME: player-db-0
+      REPMGR_NODE_NETWORK_NAME: player-db-0
     volumes:
-      - player-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PLAYER_POSTGRES_USER:-postgres} -d ${PLAYER_POSTGRES_DB:-player}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - player-db-0-data:/bitnami/postgresql
+      - ./db/replication/extra.conf:/opt/bitnami/postgresql/conf/conf.d/extra.conf:ro
+      - ./db/replication/start.sh:/replication/start.sh:ro
+
+  player-db-1:
+    <<: *repmgr
+    environment:
+      <<: *player-db-env
+      REPMGR_NODE_NAME: player-db-1
+      REPMGR_NODE_NETWORK_NAME: player-db-1
+    volumes:
+      - player-db-1-data:/bitnami/postgresql
+      - ./db/replication/extra.conf:/opt/bitnami/postgresql/conf/conf.d/extra.conf:ro
+      - ./db/replication/start.sh:/replication/start.sh:ro
+
+  player-db-2:
+    <<: *repmgr
+    environment:
+      <<: *player-db-env
+      REPMGR_NODE_NAME: player-db-2
+      REPMGR_NODE_NETWORK_NAME: player-db-2
+    volumes:
+      - player-db-2-data:/bitnami/postgresql
+      - ./db/replication/extra.conf:/opt/bitnami/postgresql/conf/conf.d/extra.conf:ro
+      - ./db/replication/start.sh:/replication/start.sh:ro
 
   player:
     image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-4}
@@ -21,7 +83,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: ${PLAYER_PORT:-8081}
-      DATABASE_URL: postgres://${PLAYER_POSTGRES_USER:-postgres}:${PLAYER_POSTGRES_PASSWORD:-qwerty}@player-db:5432/${PLAYER_POSTGRES_DB:-player}?sslmode=disable
+      # All three nodes: the pool connects to the one that accepts writes (the
+      # primary), so after a failover new connections land on the promoted node.
+      DATABASE_URL: postgres://${PLAYER_POSTGRES_USER:-postgres}:${PLAYER_POSTGRES_PASSWORD:-qwerty}@player-db-0:5432,player-db-1:5432,player-db-2:5432/${PLAYER_POSTGRES_DB:-player}?sslmode=disable&target_session_attrs=read-write&connect_timeout=3
       # Signs the access tokens; the gateway verifies them with the same value.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       # Checked on GET /events, the WebSocket Base, Crafting and Resource read
@@ -47,29 +111,48 @@ services:
     deploy:
       replicas: ${PLAYER_REPLICAS:-2}
     depends_on:
-      player-db:
+      player-db-0:
         condition: service_healthy
       discovery:
         condition: service_healthy
 
-  game-db:
-    image: postgres:17-alpine
-    restart: unless-stopped
+  # --- game-db (Lab 5): one primary and two replicas, like player-db. -------------
+  game-db-0:
+    <<: *repmgr
     environment:
-      POSTGRES_USER: ${GAME_POSTGRES_USER:-game}
-      POSTGRES_PASSWORD: ${GAME_POSTGRES_PASSWORD:-qwerty}
-      POSTGRES_DB: ${GAME_POSTGRES_DB:-game_service}
+      <<: *game-db-env
+      REPMGR_NODE_NAME: game-db-0
+      REPMGR_NODE_NETWORK_NAME: game-db-0
     ports:
       # Exposed for psql. Drop this mapping to keep the database reachable only
       # inside the network.
       - "${GAME_POSTGRES_PORT:-5433}:5432"
     volumes:
-      - game-db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${GAME_POSTGRES_USER:-game} -d ${GAME_POSTGRES_DB:-game_service}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - game-db-0-data:/bitnami/postgresql
+      - ./db/replication/extra.conf:/opt/bitnami/postgresql/conf/conf.d/extra.conf:ro
+      - ./db/replication/start.sh:/replication/start.sh:ro
+
+  game-db-1:
+    <<: *repmgr
+    environment:
+      <<: *game-db-env
+      REPMGR_NODE_NAME: game-db-1
+      REPMGR_NODE_NETWORK_NAME: game-db-1
+    volumes:
+      - game-db-1-data:/bitnami/postgresql
+      - ./db/replication/extra.conf:/opt/bitnami/postgresql/conf/conf.d/extra.conf:ro
+      - ./db/replication/start.sh:/replication/start.sh:ro
+
+  game-db-2:
+    <<: *repmgr
+    environment:
+      <<: *game-db-env
+      REPMGR_NODE_NAME: game-db-2
+      REPMGR_NODE_NETWORK_NAME: game-db-2
+    volumes:
+      - game-db-2-data:/bitnami/postgresql
+      - ./db/replication/extra.conf:/opt/bitnami/postgresql/conf/conf.d/extra.conf:ro
+      - ./db/replication/start.sh:/replication/start.sh:ro
 
   # Two instances on the same database. They are declared one by one rather than
   # with replicas because the browser connects to each directly, so each needs
@@ -81,7 +164,8 @@ services:
     restart: unless-stopped
     environment: &game-env
       PORT: ${GAME_PORT:-8082}
-      DATABASE_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable
+      # All three nodes; the pool keeps the one that accepts writes (the primary).
+      DATABASE_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db-0:5432,game-db-1:5432,game-db-2:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable&target_session_attrs=read-write&connect_timeout=3
       # The Player Service is called over gRPC, through the broker, which forwards
       # each call to a player copy (round robin, circuit breaker). The outbox is
       # published to the broker's topics there too.
@@ -117,7 +201,7 @@ services:
       # gateway only hands out its URL (GET /ws/game).
       - "${GAME_PORT:-8082}:${GAME_PORT:-8082}"
     depends_on:
-      game-db:
+      game-db-0:
         condition: service_healthy
       discovery:
         condition: service_healthy
@@ -488,22 +572,24 @@ services:
   # the warehouse's staging tables and runs etl/transform.sql there. It is the only
   # reader of another service's database, and it only reads.
   etl:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     restart: unless-stopped
     command: ["sh", "/etl/etl.sh"]
     environment:
       ETL_INTERVAL: ${ETL_INTERVAL:-10}
-      PLAYER_DB_URL: postgres://${PLAYER_POSTGRES_USER:-postgres}:${PLAYER_POSTGRES_PASSWORD:-qwerty}@player-db:5432/${PLAYER_POSTGRES_DB:-player}?sslmode=disable
-      GAME_DB_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable
+      # The sources are read from a replica when one is up (prefer-standby), so the
+      # job puts no load on the primaries.
+      PLAYER_DB_URL: postgres://${PLAYER_POSTGRES_USER:-postgres}:${PLAYER_POSTGRES_PASSWORD:-qwerty}@player-db-0:5432,player-db-1:5432,player-db-2:5432/${PLAYER_POSTGRES_DB:-player}?sslmode=disable&target_session_attrs=prefer-standby&connect_timeout=3
+      GAME_DB_URL: postgres://${GAME_POSTGRES_USER:-game}:${GAME_POSTGRES_PASSWORD:-qwerty}@game-db-0:5432,game-db-1:5432,game-db-2:5432/${GAME_POSTGRES_DB:-game_service}?sslmode=disable&target_session_attrs=prefer-standby&connect_timeout=3
       WAREHOUSE_DB_URL: postgres://${WAREHOUSE_POSTGRES_USER:-warehouse}:${WAREHOUSE_POSTGRES_PASSWORD:-qwerty}@warehouse-db:5432/${WAREHOUSE_POSTGRES_DB:-warehouse}?sslmode=disable
     volumes:
       - ./etl:/etl:ro
     depends_on:
       warehouse-db:
         condition: service_healthy
-      player-db:
+      player-db-0:
         condition: service_healthy
-      game-db:
+      game-db-0:
         condition: service_healthy
 
   # --- Monitoring (Lab 4): Prometheus + Loki + Grafana -------------------------
@@ -571,8 +657,12 @@ services:
 
 volumes:
   warehouse-db-data:
-  player-db-data:
-  game-db-data:
+  player-db-0-data:
+  player-db-1-data:
+  player-db-2-data:
+  game-db-0-data:
+  game-db-1-data:
+  game-db-2-data:
   base-db-data:
   crafting-db-data:
   exam-db-data:

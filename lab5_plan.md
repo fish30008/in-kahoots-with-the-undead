@@ -27,7 +27,7 @@ Extra credit (not in this plan): a 5 minute presentation about the PAD journey, 
 | Topic | Decision |
 |---|---|
 | 2PC vs saga | 2PC first, then the saga replaces it on the same flow. Milestone 4 has two commits per repo, so git history proves grade 8; the final code is saga only |
-| Replication | `bitnamilegacy/postgresql-repmgr` (streaming replication, automatic promotion, rejoin). Primary + 2 replicas for `player-db` and for `game-db` |
+| Replication | `bitnamilegacy/postgresql-repmgr:17.6.0-debian-12-r2` (streaming replication, automatic promotion, rejoin). Primary + 2 replicas for `player-db` and for `game-db` |
 | ETL | A script in this repo (`etl/`), run on a loop in a stock `postgres:16-alpine` container. No new image, no new repo |
 | Warehouse | One more Postgres, `warehouse-db` |
 | Cache | 3 × `redis:7-alpine`, used from the Gateway. Sharding by **our own** consistent hash ring in the Gateway (not Redis Cluster), so grade 7 is implementation and not configuration |
