@@ -76,6 +76,34 @@
     {
       "key": "sameNode",
       "value": ""
+    },
+    {
+      "key": "brokerUrl",
+      "value": "http://localhost:8070"
+    },
+    {
+      "key": "internalKey",
+      "value": "changeme"
+    },
+    {
+      "key": "joinerUser",
+      "value": ""
+    },
+    {
+      "key": "joinerId",
+      "value": ""
+    },
+    {
+      "key": "txSessionId",
+      "value": ""
+    },
+    {
+      "key": "offlineUser",
+      "value": ""
+    },
+    {
+      "key": "offlineId",
+      "value": ""
     }
   ],
   "item": [
@@ -1077,6 +1105,448 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('the inventory key has its own place on the ring', () => pm.expect(pm.response.headers.get('X-Cache-Node')).to.match(/^cache-[0-9]+$/));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Grade 8: two phase commit for joining a session",
+      "item": [
+        {
+          "name": "A player who will join",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{joinerUser}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('joinerUser', 'lab5_join_' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('joinerId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A session to join",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"lab5 two phase commit\",\n  \"host_player_id\": {{playerId}}\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('txSessionId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Join: one request, two databases, committed in both",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{txSessionId}}/players",
+            "description": "The broker does not forward this request. It asks Player to PREPARE the online flag and Game to PREPARE the member row, stores its decision, then tells both to COMMIT.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": {{joinerId}}\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201: joined', () => pm.response.to.have.status(201));",
+                  "pm.test('the member the Game Service prepared', () => pm.expect(pm.response.json().player_id).to.equal(Number(pm.collectionVariables.get('joinerId'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The coordinator's record: committed, participants player and game",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/transactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const tx = pm.response.json().transactions[0];",
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('state committed', () => pm.expect(tx.state).to.equal('committed'));",
+                  "pm.test('participants: player, game', () => pm.expect(tx.participants).to.eql(['player', 'game']));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The Player half happened: the joiner is online",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{joinerId}}",
+            "description": "Before Lab 5 the Game Service set this flag from a goroutine after answering, and did not care whether it landed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('is_online is true', () => pm.expect(pm.response.json().is_online).to.equal(true));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Game votes no (already a member): 409, nothing committed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{txSessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": {{joinerId}}\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409, the answer of the Game Service', () => pm.response.to.have.status(409));",
+                  "pm.test('says why', () => pm.expect(pm.response.json().error).to.include('already a member'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The coordinator's record: aborted, because game voted no",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/transactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const tx = pm.response.json().transactions[0];",
+                  "pm.test('state aborted', () => pm.expect(tx.state).to.equal('aborted'));",
+                  "pm.test('game voted no: 409', () => pm.expect(tx.detail).to.equal('game voted no: 409'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A player who was never online",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{offlineUser}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('offlineUser', 'lab5_off_' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('offlineId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Player votes yes, Game votes no (no such session): 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/00000000-0000-4000-8000-000000000000/players",
+            "description": "Player had already prepared online=true for this player when Game said no. The coordinator tells Player to ROLLBACK PREPARED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": {{offlineId}}\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 from the Game Service', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Atomic: the Player half was rolled back, the player is still offline",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{offlineId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('is_online is false', () => pm.expect(pm.response.json().is_online).to.equal(false));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Player votes no (unknown player): 422, Game is never asked",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{txSessionId}}/players",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"player_id\": 999999999\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422', () => pm.response.to.have.status(422));",
+                  "pm.test('unknown player', () => pm.expect(pm.response.json().error).to.include('unknown player'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The coordinator's record: aborted, because player voted no",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/transactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const tx = pm.response.json().transactions[0];",
+                  "pm.test('player voted no: 422', () => pm.expect(tx.detail).to.equal('player voted no: 422'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The transaction list needs the internal key",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/transactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 without the key', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The participants' endpoints are closed on the gateway",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/internal/tx/00000000-0000-4000-8000-000000000000/commit"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404: players cannot commit or roll back anything', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Clean up: delete the session",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{txSessionId}}",
+            "description": "The broker stopped between the decision and the commit: Test-TwoPhaseCrash in lab5-tests.ps1."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204', () => pm.response.to.have.status(204));"
                 ]
               }
             }

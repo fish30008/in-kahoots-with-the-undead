@@ -12,7 +12,7 @@ def req(name, method, url, tests, body=None, headers=None, desc=None, pre=None):
         r["request"]["description"] = desc
     if body is not None:
         r["request"]["header"].append({"key": "Content-Type", "value": "application/json"})
-        r["request"]["body"] = {"mode": "raw", "raw": json.dumps(body, indent=2).replace('"{{playerId}}"', "{{playerId}}")}
+        r["request"]["body"] = {"mode": "raw", "raw": json.dumps(body, indent=2).replace('"{{playerId}}"', "{{playerId}}").replace('"{{joinerId}}"', "{{joinerId}}").replace('"{{offlineId}}"', "{{offlineId}}")}
     ev = [{"listen": "test", "script": {"type": "text/javascript", "exec": tests}}]
     if pre:
         ev.insert(0, {"listen": "prerequest", "script": {"type": "text/javascript", "exec": pre}})
@@ -216,6 +216,72 @@ g7 = [
         desc="A node going down, a node being added, and ring against `hash % N`: Test-CacheNodeDown and Show-HashRing in lab5-tests.ps1."),
 ]
 
+KEY = {"X-Internal-Key": "{{internalKey}}"}
+JOIN = "{{gatewayUrl}}/game/sessions/{{txSessionId}}/players"
+LAST_TX = ["const tx = pm.response.json().transactions[0];"]
+
+g8 = [
+    req("A player who will join", "POST", "{{gatewayUrl}}/auth/register",
+        ["pm.test('201', () => pm.response.to.have.status(201));",
+         "pm.collectionVariables.set('joinerId', pm.response.json().id);"],
+        body={"username": "{{joinerUser}}", "password": "{{password}}"},
+        pre=["pm.collectionVariables.set('joinerUser', 'lab5_join_' + Date.now());"]),
+    req("A session to join", "POST", "{{gatewayUrl}}/game/sessions",
+        ["pm.test('201', () => pm.response.to.have.status(201));",
+         "pm.collectionVariables.set('txSessionId', pm.response.json().id);"],
+        body={"name": "lab5 two phase commit", "host_player_id": "{{playerId}}"}, headers=AUTH),
+    req("Join: one request, two databases, committed in both", "POST", JOIN,
+        ["pm.test('201: joined', () => pm.response.to.have.status(201));",
+         "pm.test('the member the Game Service prepared', () => pm.expect(pm.response.json().player_id).to.equal(Number(pm.collectionVariables.get('joinerId'))));"],
+        body={"player_id": "{{joinerId}}"}, headers=AUTH,
+        desc="The broker does not forward this request. It asks Player to PREPARE the online flag and Game to PREPARE the member row, stores its decision, then tells both to COMMIT."),
+    req("The coordinator's record: committed, participants player and game", "GET", "{{brokerUrl}}/transactions",
+        LAST_TX + ["pm.test('200', () => pm.response.to.have.status(200));",
+                   "pm.test('state committed', () => pm.expect(tx.state).to.equal('committed'));",
+                   "pm.test('participants: player, game', () => pm.expect(tx.participants).to.eql(['player', 'game']));"],
+        headers=KEY),
+    req("The Player half happened: the joiner is online", "GET", "{{gatewayUrl}}/players/{{joinerId}}",
+        ["pm.test('is_online is true', () => pm.expect(pm.response.json().is_online).to.equal(true));"],
+        headers=AUTH, desc="Before Lab 5 the Game Service set this flag from a goroutine after answering, and did not care whether it landed."),
+    req("Game votes no (already a member): 409, nothing committed", "POST", JOIN,
+        ["pm.test('409, the answer of the Game Service', () => pm.response.to.have.status(409));",
+         "pm.test('says why', () => pm.expect(pm.response.json().error).to.include('already a member'));"],
+        body={"player_id": "{{joinerId}}"}, headers=AUTH),
+    req("The coordinator's record: aborted, because game voted no", "GET", "{{brokerUrl}}/transactions",
+        LAST_TX + ["pm.test('state aborted', () => pm.expect(tx.state).to.equal('aborted'));",
+                   "pm.test('game voted no: 409', () => pm.expect(tx.detail).to.equal('game voted no: 409'));"],
+        headers=KEY),
+    req("A player who was never online", "POST", "{{gatewayUrl}}/auth/register",
+        ["pm.test('201', () => pm.response.to.have.status(201));",
+         "pm.collectionVariables.set('offlineId', pm.response.json().id);"],
+        body={"username": "{{offlineUser}}", "password": "{{password}}"},
+        pre=["pm.collectionVariables.set('offlineUser', 'lab5_off_' + Date.now());"]),
+    req("Player votes yes, Game votes no (no such session): 404", "POST",
+        "{{gatewayUrl}}/game/sessions/00000000-0000-4000-8000-000000000000/players",
+        ["pm.test('404 from the Game Service', () => pm.response.to.have.status(404));"],
+        body={"player_id": "{{offlineId}}"}, headers=AUTH,
+        desc="Player had already prepared online=true for this player when Game said no. The coordinator tells Player to ROLLBACK PREPARED."),
+    req("Atomic: the Player half was rolled back, the player is still offline", "GET", "{{gatewayUrl}}/players/{{offlineId}}",
+        ["pm.test('is_online is false', () => pm.expect(pm.response.json().is_online).to.equal(false));"],
+        headers=AUTH),
+    req("Player votes no (unknown player): 422, Game is never asked", "POST", JOIN,
+        ["pm.test('422', () => pm.response.to.have.status(422));",
+         "pm.test('unknown player', () => pm.expect(pm.response.json().error).to.include('unknown player'));"],
+        body={"player_id": 999999999}, headers=AUTH),
+    req("The coordinator's record: aborted, because player voted no", "GET", "{{brokerUrl}}/transactions",
+        LAST_TX + ["pm.test('player voted no: 422', () => pm.expect(tx.detail).to.equal('player voted no: 422'));"],
+        headers=KEY),
+    req("The transaction list needs the internal key", "GET", "{{brokerUrl}}/transactions",
+        ["pm.test('401 without the key', () => pm.response.to.have.status(401));"]),
+    req("The participants' endpoints are closed on the gateway", "POST",
+        "{{gatewayUrl}}/game/internal/tx/00000000-0000-4000-8000-000000000000/commit",
+        ["pm.test('404: players cannot commit or roll back anything', () => pm.response.to.have.status(404));"],
+        headers=AUTH),
+    req("Clean up: delete the session", "DELETE", "{{gatewayUrl}}/game/sessions/{{txSessionId}}",
+        ["pm.test('204', () => pm.response.to.have.status(204));"], headers=AUTH,
+        desc="The broker stopped between the decision and the commit: Test-TwoPhaseCrash in lab5-tests.ps1."),
+]
+
 collection = {
     "info": {
         "name": "Lab 5: defence",
@@ -227,13 +293,16 @@ collection = {
         ("password", "hunter2hunter2"), ("user", ""), ("playerId", ""), ("token", ""),
         ("sessionId", ""), ("replicatedUser", ""), ("replicatedId", ""), ("tries", "0"),
         ("cachedUser", ""), ("cachedId", ""), ("cachedNode", ""), ("cachedBody", ""), ("cacheToken", ""),
-        ("ringId", ""), ("ringNodes", "{}"), ("sameNode", "")]],
+        ("ringId", ""), ("ringNodes", "{}"), ("sameNode", ""),
+        ("brokerUrl", "http://localhost:8070"), ("internalKey", "changeme"),
+        ("joinerUser", ""), ("joinerId", ""), ("txSessionId", ""), ("offlineUser", ""), ("offlineId", "")]],
     "item": [
         {"name": "0. Setup: a player and a token", "item": setup},
         {"name": "Grade 4: Data Warehouse and ETL", "item": g4},
         {"name": "Grade 5: database replication and failover", "item": g5},
         {"name": "Grade 6: cache for common GET requests and for authentication data", "item": g6},
         {"name": "Grade 7: cache sharding by consistent hashing", "item": g7},
+        {"name": "Grade 8: two phase commit for joining a session", "item": g8},
     ],
 }
 
