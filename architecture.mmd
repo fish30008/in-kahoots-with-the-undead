@@ -6,11 +6,11 @@ flowchart TB
 
     client(["<b>Game client</b> · browser · nginx on :3000, /api proxied to the gateway"])
 
-    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/>X-Request-Id on every request"]
+    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/>X-Request-Id on every request<br/><b>cache</b> (Lab 5): GET responses and verified tokens · the node for a key is picked on a <b>consistent hash ring</b>"]
 
-    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>load-based</b>: fewest calls in progress · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered<br/><b>rerouting</b>: a failed call goes to another copy · <b>durable queues</b> in SQLite (broker-data) · <b>dead letter channel</b>: GET /dead-letters"]
+    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>load-based</b>: fewest calls in progress · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered<br/><b>rerouting</b>: a failed call goes to another copy · <b>durable queues</b> in SQLite (broker-data) · <b>dead letter channel</b>: GET /dead-letters<br/><b>saga coordinator</b> (Lab 5): joining a session = a Player step + a Game step, compensated in reverse when one fails · state in SQLite"]
 
-    subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db"]
+    subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db (Lab 5: primary + 2 replicas)"]
         direction LR
         player1["<b>player-1</b> · :8081 REST · :9081 gRPC<br/>accounts, login + JWT, XP,<br/>items, inventory, trades"]
         player2["<b>player-2</b> · :8081<br/>same image"]
@@ -37,6 +37,51 @@ flowchart TB
     telegram(["<b>Telegram</b> · developers' chat · ALERT · RESOLVED · REMOVED"])
 
     logs[("<b>logs volume</b> · /logs/&lt;service&gt;-&lt;hostname&gt;.log, rotated at 5 MB, 3 kept<br/>written by gateway, discovery, broker, every Player and Game copy<br/>one shape: time LEVEL [service-component] message req=…")]
+
+
+    %% data stores (Lab 5: drawn at last, with replicas, warehouse and cache)
+    subgraph cache["Cache (Lab 5) · Redis · sharded by consistent hashing, in the Gateway"]
+        direction LR
+        cache1[("<b>cache-1</b>")]
+        cache2[("<b>cache-2</b>")]
+        cache3[("<b>cache-3</b>")]
+    end
+
+    brokerdata[("<b>broker-data</b> · SQLite volume<br/>durable topic queues, subscriptions,<br/>dead letters, saga log")]
+
+    subgraph playerdb["player-db · PostgreSQL · streaming replication, automatic failover (repmgr)"]
+        direction LR
+        playerdb0[("<b>player-db-0</b> · primary<br/>players, items, inventory,<br/>trades, outbox_events")]
+        playerdb1[("<b>player-db-1</b><br/>replica")]
+        playerdb2[("<b>player-db-2</b><br/>replica")]
+        playerdb0 == "WAL" ==> playerdb1
+        playerdb0 == "WAL" ==> playerdb2
+    end
+
+    subgraph gamedb["game-db · PostgreSQL · streaming replication, automatic failover (repmgr)"]
+        direction LR
+        gamedb0[("<b>game-db-0</b> · primary<br/>sessions, members, actions, zombies,<br/>outbox_events, received_events")]
+        gamedb1[("<b>game-db-1</b><br/>replica")]
+        gamedb2[("<b>game-db-2</b><br/>replica")]
+        gamedb0 == "WAL" ==> gamedb1
+        gamedb0 == "WAL" ==> gamedb2
+    end
+
+    teamdb[("<b>6 PostgreSQL databases</b>, one per teammate service<br/>exam-db · world-db · zombie-db · resource-db · base-db · crafting-db")]
+
+    etl["<b>ETL job</b> (Lab 5) · etl/etl.sh in a stock Postgres image · every 10 s<br/><b>extract</b>: COPY out of the Player and Game databases (read-only)<br/><b>transform + load</b>: staging → dim_player, fact_session, fact_action"]
+
+    warehouse[("<b>Data Warehouse</b> (Lab 5) · warehouse-db · PostgreSQL<br/>stg_* · dim_player · fact_session · fact_action · etl_runs")]
+
+    %% who stores where
+    gateway -- "GET responses · verified tokens" --> cache
+    broker --> brokerdata
+    playercopies -- "SQL · finds the primary by itself (multi-host URL)" --> playerdb
+    gamecopies -- "SQL · NOTIFY / LISTEN · advisory lock" --> gamedb
+    team --> teamdb
+    playerdb -. "read from a replica" .-> etl
+    gamedb -. "read from a replica" .-> etl
+    etl -- "load" --> warehouse
 
     %% browser
     client -- "REST · cookie or Bearer" --> gateway
@@ -65,18 +110,19 @@ flowchart TB
         prometheus["<b>Prometheus</b> · :9090<br/>scrapes /metrics on :9100 of every copy"]
         alloy["<b>Alloy</b><br/>every container's output,<br/>via the Docker socket"]
         loki["<b>Loki</b><br/>logs, labels: service, level, tag"]
-        grafana["<b>Grafana</b> · :3001<br/>one dashboard: metrics + logs"]
+        grafana["<b>Grafana</b> · :3001<br/>one dashboard: metrics, logs,<br/>warehouse analytics"]
     end
     prometheus -- "GET /prometheus: what to scrape" --> discovery
     alloy --> loki
     grafana --> prometheus
     grafana --> loki
+    grafana -- "Analytics row (SQL)" --> warehouse
 
     %% events for the teammates' services (/events WebSockets, URL negotiated with the broker)
     playercopies -. "player.registered<br/>player.leveled_up" .-> team
     gamecopies -. "game.action_completed" .-> team
 
-    legend["<b>Legend</b> · solid: REST, every request through the broker · thick into the broker: gRPC between our services<br/>thick into Discovery: registration, health checks, the registry and subscriptions · dashed: WebSockets opened directly<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS"]
+    legend["<b>Legend</b> · solid: REST, every request through the broker · thick into the broker: gRPC between our services<br/>thick into Discovery: registration, health checks, the registry and subscriptions · dashed: WebSockets opened directly<br/>green border: ours · dark: Python (banned language) · blue: Go · yellow: NestJS · cylinders: data stores"]
     telegram ~~~ legend
 
     classDef py fill:#1f2937,color:#ffffff,stroke:#15803d,stroke-width:4px
@@ -84,14 +130,21 @@ flowchart TB
     classDef go fill:#dbeafe,stroke:#3b82f6,color:#111827
     classDef ts fill:#fef3c7,stroke:#d97706,color:#111827
     classDef ext fill:#f3f4f6,stroke:#6b7280,color:#111827
+    classDef mine fill:#ffffff,stroke:#15803d,stroke-width:4px,color:#111827
+    classDef store fill:#ecfeff,stroke:#15803d,stroke-width:3px,color:#111827
     classDef note fill:#ffffff,stroke:#9ca3af,color:#374151,stroke-dasharray:4 3
     class gateway,discovery,broker py
     class player1,player2,game1,game2 mineGo
     class base,crafting go
+    class etl mine
+    class playerdb0,playerdb1,playerdb2,gamedb0,gamedb1,gamedb2,warehouse,cache1,cache2,cache3,brokerdata store
     class exam,world,zombie,resource ts
-    class client,telegram,logs,prometheus,alloy,loki,grafana ext
+    class client,telegram,logs,prometheus,alloy,loki,grafana,teamdb ext
     class legend note
     style playercopies fill:#f0fdf4,stroke:#15803d
     style gamecopies fill:#f0fdf4,stroke:#15803d
     style team fill:#fffbeb,stroke:#d97706
     style monitoring fill:#f9fafb,stroke:#6b7280
+    style playerdb fill:#f0fdf4,stroke:#15803d
+    style gamedb fill:#f0fdf4,stroke:#15803d
+    style cache fill:#f0fdf4,stroke:#15803d

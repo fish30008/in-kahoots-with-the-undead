@@ -6,7 +6,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 41,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -1250,6 +1250,223 @@
         "y": 48,
         "w": 12,
         "h": 10
+      }
+    },
+    {
+      "type": "row",
+      "title": "Analytics (Data Warehouse, filled by the ETL job)",
+      "collapsed": false,
+      "panels": [],
+      "id": 27,
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Actions by type",
+      "description": "fact_action: every timed action the ETL job loaded from the Game database",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "warehouse"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "warehouse"
+          },
+          "rawSql": "SELECT type, COUNT(*) AS actions FROM fact_action GROUP BY type ORDER BY actions DESC",
+          "rawQuery": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "id": 28,
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 6,
+        "h": 9
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "XP earned from actions, top players",
+      "description": "fact_action joined with dim_player: Game's actions, Player's usernames",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "warehouse"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "warehouse"
+          },
+          "rawSql": "SELECT p.username, SUM(a.xp_awarded) AS xp FROM fact_action a JOIN dim_player p ON p.player_id = a.player_id WHERE a.status = 'completed' GROUP BY p.username ORDER BY xp DESC LIMIT 10",
+          "rawQuery": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "id": 29,
+      "gridPos": {
+        "x": 6,
+        "y": 59,
+        "w": 6,
+        "h": 9
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Sessions per day",
+      "description": "fact_session, by the day the session was created (UTC)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "warehouse"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "warehouse"
+          },
+          "rawSql": "SELECT created_day::text AS day, COUNT(*) AS sessions FROM fact_session GROUP BY created_day ORDER BY created_day DESC LIMIT 14",
+          "rawQuery": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "id": 30,
+      "gridPos": {
+        "x": 12,
+        "y": 59,
+        "w": 6,
+        "h": 9
+      }
+    },
+    {
+      "type": "table",
+      "title": "ETL runs",
+      "description": "etl_runs: the last runs of the job and how many rows each one read",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "warehouse"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "warehouse"
+          },
+          "rawSql": "SELECT started_at, status, players, sessions, actions, error FROM etl_runs ORDER BY id DESC LIMIT 20",
+          "rawQuery": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "id": 31,
+      "gridPos": {
+        "x": 18,
+        "y": 59,
+        "w": 6,
+        "h": 9
       }
     }
   ]

@@ -11,3 +11,16 @@ datasources:
     type: loki
     access: proxy
     url: http://loki:3100
+  # The Data Warehouse (Lab 5), for the Analytics row of the dashboard.
+  - name: Warehouse
+    uid: warehouse
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: warehouse-db:5432
+    user: $WAREHOUSE_POSTGRES_USER
+    secureJsonData:
+      password: $WAREHOUSE_POSTGRES_PASSWORD
+    jsonData:
+      database: $WAREHOUSE_POSTGRES_DB
+      sslmode: disable
+      postgresVersion: 1600
