@@ -513,11 +513,18 @@ services:
       DISCOVERY_URL: http://discovery:8090
       # Its own log file goes here, on the volume the broker's GET /logs reads.
       LOG_DIR: /logs
+      # The cache (Lab 5): common GET answers and verified tokens. The gateway picks
+      # the node for a key itself, on a consistent hash ring, so adding a node here
+      # moves only about 1/N of the keys. Empty means no cache.
+      CACHE_NODES: ${CACHE_NODES-cache-1:6379,cache-2:6379,cache-3:6379}
     volumes:
       - logs:/logs
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
+      - cache-1
+      - cache-2
+      - cache-3
       - discovery
       - broker
       - player
@@ -529,6 +536,23 @@ services:
       - resource
       - base
       - crafting
+
+  # --- Cache (Lab 5): three independent Redis nodes, no Redis Cluster. -----------
+  # They do not know about each other: the sharding is done by the gateway's hash
+  # ring. Memory only, least recently used keys go first when a node is full.
+  cache-1: &cache
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cache-2: *cache
+
+  cache-3: *cache
 
   client:
     image: ${CLIENT_DOCKERHUB_USERNAME:-mixam052}/kahoots-client:${CLIENT_SERVICE_TAG:-2}

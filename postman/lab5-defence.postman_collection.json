@@ -44,6 +44,38 @@
     {
       "key": "tries",
       "value": "0"
+    },
+    {
+      "key": "cachedUser",
+      "value": ""
+    },
+    {
+      "key": "cachedId",
+      "value": ""
+    },
+    {
+      "key": "cachedNode",
+      "value": ""
+    },
+    {
+      "key": "cachedBody",
+      "value": ""
+    },
+    {
+      "key": "cacheToken",
+      "value": ""
+    },
+    {
+      "key": "ringId",
+      "value": ""
+    },
+    {
+      "key": "ringNodes",
+      "value": "{}"
+    },
+    {
+      "key": "sameNode",
+      "value": ""
     }
   ],
   "item": [
@@ -532,6 +564,519 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('204: found and deleted', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Grade 6: cache for common GET requests and for authentication data",
+      "item": [
+        {
+          "name": "A fresh player for this folder",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "description": "Nobody has asked for this player yet, so the first GET below is certainly not in the cache.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{cachedUser}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('cachedUser', 'lab5_cache_' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201: the player is created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('cachedId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET a player the first time: MISS, the Player Service answers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{cachedId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Cache: MISS', () => pm.expect(pm.response.headers.get('X-Cache')).to.equal('MISS'));",
+                  "pm.test('X-Cache-Node names the Redis node the key lives on', () => pm.expect(pm.response.headers.get('X-Cache-Node')).to.match(/^cache-[0-9]+$/));",
+                  "pm.collectionVariables.set('cachedNode', pm.response.headers.get('X-Cache-Node'));",
+                  "pm.collectionVariables.set('cachedBody', pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET it again: HIT, answered by the gateway from Redis",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{cachedId}}",
+            "description": "The request never reached the broker or the Player Service: the gateway log says `-> cache at cache-N`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Cache: HIT', () => pm.expect(pm.response.headers.get('X-Cache')).to.equal('HIT'));",
+                  "pm.test('from the same node as before', () => pm.expect(pm.response.headers.get('X-Cache-Node')).to.equal(pm.collectionVariables.get('cachedNode')));",
+                  "pm.test('the same body the service gave', () => pm.expect(pm.response.text()).to.equal(pm.collectionVariables.get('cachedBody')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Change the player: the cached answer is dropped",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{cachedId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{cachedUser}}\",\n  \"display_name\": \"Changed\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200: updated', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET after the change: MISS, and the new value",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{cachedId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('X-Cache: MISS (the change removed the key)', () => pm.expect(pm.response.headers.get('X-Cache')).to.equal('MISS'));",
+                  "pm.test('the new display name, not the cached one', () => pm.expect(pm.response.json().display_name).to.equal('Changed'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The item catalog is cached too (asked twice: the second is a HIT)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/items"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('tries')) pm.collectionVariables.set('tries', 0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const asked = Number(pm.collectionVariables.get('tries') || 0);",
+                  "if (asked === 0) { pm.collectionVariables.set('tries', 1); postman.setNextRequest(pm.info.requestName); return; }",
+                  "pm.collectionVariables.set('tries', 0);",
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Cache: HIT', () => pm.expect(pm.response.headers.get('X-Cache')).to.equal('HIT'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "A route that is not on the list is never cached",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "description": "Only the GET routes in the gateway's CACHED_GETS list are cached: the ones whose answer is the same for every player."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('no X-Cache header', () => pm.expect(pm.response.headers.has('X-Cache')).to.equal(false));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log in: a new token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{cachedUser}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 and a token', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('cacheToken', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Authentication data: the first request with a token verifies its signature (MISS)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cacheToken}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Auth-Cache: MISS', () => pm.expect(pm.response.headers.get('X-Auth-Cache')).to.equal('MISS'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The next request with it: the player id comes from Redis (HIT)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cacheToken}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "description": "The key is auth:<SHA-256 of the token>, the value the player id. The token itself is never stored."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Auth-Cache: HIT', () => pm.expect(pm.response.headers.get('X-Auth-Cache')).to.equal('HIT'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout needs a real token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer not-a-token"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/logout"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 for a token nobody issued', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log out: the token is revoked in the cache",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cacheToken}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/logout",
+            "description": "A JWT cannot be taken back by the service that issued it. The gateway remembers it as revoked until it would have expired."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('logged_out', () => pm.expect(pm.response.json().status).to.equal('logged_out'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The logged out token is refused, although its signature is still valid",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cacheToken}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));",
+                  "pm.test('the reason is the logout', () => pm.expect(pm.response.json().error.message).to.include('logged out'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Another token of the same player still works",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200: only the logged out token is refused', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Grade 7: cache sharding by consistent hashing",
+      "item": [
+        {
+          "name": "30 keys are spread over the three nodes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{ringId}}",
+            "description": "Asks for /players/1 ... /players/30 (whether they exist does not matter) and counts the X-Cache-Node of each: the node the gateway's hash ring picked for the key get:/players/<n>."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('ringId')) {",
+                  "    pm.collectionVariables.set('ringId', 1);",
+                  "    pm.collectionVariables.set('ringNodes', '{}');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const nodes = JSON.parse(pm.collectionVariables.get('ringNodes') || '{}');",
+                  "const node = pm.response.headers.get('X-Cache-Node');",
+                  "nodes[node] = (nodes[node] || 0) + 1;",
+                  "pm.collectionVariables.set('ringNodes', JSON.stringify(nodes));",
+                  "const id = Number(pm.collectionVariables.get('ringId'));",
+                  "if (id < 30) { pm.collectionVariables.set('ringId', id + 1); postman.setNextRequest(pm.info.requestName); return; }",
+                  "pm.collectionVariables.set('ringId', '');",
+                  "console.log('keys per node:', JSON.stringify(nodes));",
+                  "pm.test('every key names its node', () => pm.expect(Object.keys(nodes).every(n => /^cache-[0-9]+$/.test(n))).to.equal(true));",
+                  "pm.test('all three nodes hold keys: ' + JSON.stringify(nodes), () => pm.expect(Object.keys(nodes).length).to.equal(3));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The same key always goes to the same node",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/7",
+            "description": "The node is computed from the key alone (MD5 of the key, first ring point clockwise), so nothing has to be remembered about where a key is."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('sameNode') === undefined) pm.collectionVariables.set('sameNode', '');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const node = pm.response.headers.get('X-Cache-Node');",
+                  "const first = pm.collectionVariables.get('sameNode');",
+                  "if (!first) { pm.collectionVariables.set('sameNode', node); postman.setNextRequest(pm.info.requestName); return; }",
+                  "pm.collectionVariables.set('sameNode', '');",
+                  "pm.test('asked twice, the same node: ' + node, () => pm.expect(node).to.equal(first));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Different keys of one player may live on different nodes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/7/inventory",
+            "description": "A node going down, a node being added, and ring against `hash % N`: Test-CacheNodeDown and Show-HashRing in lab5-tests.ps1."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('the inventory key has its own place on the ring', () => pm.expect(pm.response.headers.get('X-Cache-Node')).to.match(/^cache-[0-9]+$/));"
                 ]
               }
             }

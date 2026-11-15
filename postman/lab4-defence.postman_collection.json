@@ -1,0 +1,1726 @@
+{
+  "info": {
+    "_postman_id": "e6897add-c94c-5b73-8f08-399009dd1cdf",
+    "name": "Lab 4: defence, grades 5-10",
+    "description": "One folder per grade, run top to bottom against the whole stack (docker compose up -d). Folder 0 creates the player every other folder uses.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Setup: a player with a game session",
+      "description": "Run first: the other folders use this player.",
+      "item": [
+        {
+          "name": "Register a player",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('user', 'defence_' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('playerId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{user}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Log in",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('token', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{user}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Host a game session (Game calls Player through the broker)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('sessionId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"defence {{user}}\",\n  \"host_player_id\": {{playerId}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Grade 5: broker carries service-to-service, load balancing and circuit breakers",
+      "description": "The broker is its own published image; services talk to each other only through it; it picks the instance and runs the breakers. HA demo: `docker kill` one player copy, then run the last request: still all 200, and the broker log shows rerouted / TRIPPED.",
+      "item": [
+        {
+          "name": "Broker is up (image fish3008/broker_service:4)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const h = pm.response.json();",
+                  "pm.test('it is the broker', () => pm.expect(h.service).to.eql('broker'));",
+                  "pm.test('reports its load', () => pm.expect(h).to.include.keys('in_flight', 'max_concurrent', 'queues'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/health"
+          }
+        },
+        {
+          "name": "Broker is registered in the Service Discovery, next to two player copies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test('broker registered', () => pm.expect(s).to.have.property('broker'));",
+                  "pm.test('two player copies to balance', () => pm.expect(s.player.length).to.be.at.least(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/services"
+          }
+        },
+        {
+          "name": "Gateway → broker: the broker names the copy that answered",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('X-Upstream-Instance set by the broker', () => pm.expect(pm.response.headers.get('X-Upstream-Instance')).to.match(/^http:\\/\\/.+:8081$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players?limit=1",
+            "description": "Asks for the player list, which the gateway does not cache (Lab 5), so every call reaches the Player Service."
+          }
+        },
+        {
+          "name": "Load balancing in the broker: 6 calls reach both player copies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const seen = new Set([pm.response.headers.get('X-Upstream-Instance')]);",
+                  "let left = 5;",
+                  "for (let i = 0; i < 5; i++) pm.sendRequest({url: pm.variables.replaceIn('{{gatewayUrl}}/players?limit=1'), header: {Authorization: 'Bearer ' + pm.collectionVariables.get('token')}}, (err, res) => {",
+                  "  seen.add(res.headers.get('X-Upstream-Instance'));",
+                  "  if (--left === 0) { console.log('copies used:', [...seen]); pm.test('both copies answered', () => pm.expect(seen.size).to.be.at.least(2)); }",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players?limit=1",
+            "description": "Asks for the player list, which the gateway does not cache (Lab 5), so every call reaches the Player Service."
+          }
+        },
+        {
+          "name": "Service → service through the broker: grant XP (Player)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('xp granted', () => pm.expect(pm.response.json().xp).to.eql(10));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/players/{{playerId}}/xp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delta\": 10,\n  \"reason\": \"defence grade 5\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Service → service through the broker: a teammate's service (World)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('spawn points from World', () => pm.expect(pm.response.json()).to.be.an('array').that.is.not.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/world/spawn-points"
+          }
+        },
+        {
+          "name": "Game → broker → Player: the session's calls in the broker log",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('Game reached Player through the broker', () => pm.expect(pm.response.text()).to.match(/\\/player\\.Player\\/\\w+ OK .*-> player at /));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=/player.Player/&lines=20"
+          }
+        },
+        {
+          "name": "Unknown service: the broker answers, not a crash",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "pm.test('gateway error shape', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/queues/nope/x"
+          }
+        },
+        {
+          "name": "HA: 6 calls all succeed (docker kill a player copy before this one)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "let ok = 0, left = 5;",
+                  "for (let i = 0; i < 5; i++) pm.sendRequest({url: pm.variables.replaceIn('{{gatewayUrl}}/players?limit=1'), header: {Authorization: 'Bearer ' + pm.collectionVariables.get('token')}}, (err, res) => {",
+                  "  if (!err && res.code === 200) ok++;",
+                  "  if (--left === 0) pm.test('no client saw an error', () => pm.expect(ok).to.eql(5));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players?limit=1",
+            "description": "Asks for the player list, which the gateway does not cache (Lab 5), so every call reaches the Player Service."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Grade 6: subscriber queues (gateway → service) and topics (service → service)",
+      "description": "Subscriber queue: the sender names the service, one copy answers, the sender waits. Topic: the producer does not know who listens; subscriptions come from the registration.",
+      "item": [
+        {
+          "name": "Subscriber queue: /queues/player/… → one copy answers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('one copy named', () => pm.expect(pm.response.headers.get('X-Upstream-Instance')).to.include(':8081'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/queues/player/health"
+          }
+        },
+        {
+          "name": "Queues are closed without the key (only the gateway has it)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/queues/player/health"
+          }
+        },
+        {
+          "name": "The queues and their depth (bounded at 100)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const h = pm.response.json();",
+                  "pm.test('a queue per service', () => pm.expect(h.queues).to.include.keys('player'));",
+                  "pm.test('bound = MAX_CONCURRENT_TASKS', () => pm.expect(h.max_concurrent).to.eql(100));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/health"
+          }
+        },
+        {
+          "name": "Topics come from registration: Discovery /subscriptions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test('game subscribed to player.leveled_up', () => pm.expect(s['player.leveled_up']).to.include('game'));",
+                  "pm.test('player subscribed to game.action_completed', () => pm.expect(s['game.action_completed']).to.include('player'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/subscriptions"
+          }
+        },
+        {
+          "name": "Publishing needs the key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/topics/defence.check",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"x\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Publish to a topic nobody wants: accepted, no subscriber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));",
+                  "pm.test('nobody listens', () => pm.expect(pm.response.json().subscribers).to.eql([]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/topics/defence.check",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{$guid}}\",\n  \"type\": \"defence.check\",\n  \"version\": 1,\n  \"payload\": {}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Level-up: 150 XP more (Player publishes player.leveled_up from its outbox)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('level 2', () => pm.expect(pm.response.json().level).to.eql(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/players/{{playerId}}/xp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delta\": 150,\n  \"reason\": \"defence grade 6\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "The event went player → broker → game, and Game told the session",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('Game received it and told the session', () => pm.expect(pm.response.text()).to.match(/received player\\.leveled_up .*told 1 session/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?contains=player {{playerId}} reached level 2&lines=5"
+          }
+        },
+        {
+          "name": "Broker log: published, stored for game, delivered over gRPC",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.text();",
+                  "pm.test('stored for game', () => pm.expect(t).to.include('stored for game'));",
+                  "pm.test('delivered to one game copy', () => pm.expect(t).to.match(/delivered to game at \\S+:9082 \\(gRPC\\)/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=player.leveled_up&lines=10"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Grade 7: thread-per-request in the broker, list of topics",
+      "description": "ThreadingHTTPServer: a new thread for every request, named req-<n>; HTTP/1.0 so one request per connection. Live demo outside Postman: hold 10 connections open and watch request_threads go 1 → 11 → 1.",
+      "item": [
+        {
+          "name": "GET /topics: every topic, its subscribers and counts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.json().topics;",
+                  "const lv = t.find(x => x.topic === 'player.leveled_up');",
+                  "pm.test('player.leveled_up → game', () => pm.expect(lv.subscribers).to.include('game'));",
+                  "pm.test('counts per topic', () => pm.expect(lv).to.include.keys('published', 'delivered', 'waiting', 'dead'));",
+                  "pm.test('the level-up of grade 6 was delivered', () => pm.expect(lv.delivered).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/topics"
+          }
+        },
+        {
+          "name": "/health counts the request threads (this one included)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const h = pm.response.json();",
+                  "pm.test('this request has a thread of its own', () => pm.expect(h.request_threads).to.be.at.least(1));",
+                  "pm.test('plus the long-lived workers', () => pm.expect(h.threads).to.be.above(h.request_threads));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/health"
+          }
+        },
+        {
+          "name": "Mark a request with an id",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('reqId', 'def7' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Request-Id",
+                "value": "{{reqId}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/topics"
+          }
+        },
+        {
+          "name": "…its log line names its own thread",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('thread=req-<n>', () => pm.expect(pm.response.text()).to.match(/req=def7\\d+ thread=req-\\d+/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=req={{reqId}}"
+          }
+        },
+        {
+          "name": "5 requests at once get 5 different threads",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('burst', 'burst' + Date.now());",
+                  "for (let i = 0; i < 5; i++) pm.sendRequest({url: pm.variables.replaceIn('{{brokerUrl}}/topics'), header: {'X-Request-Id': pm.collectionVariables.get('burst')}}, () => {});",
+                  "setTimeout(() => {}, 1500);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.sendRequest({url: pm.variables.replaceIn('{{brokerUrl}}/logs?service=broker&contains=req={{burst}}'), header: {'X-Internal-Key': pm.collectionVariables.get('internalKey')}}, (err, res) => {",
+                  "  const threads = new Set((res.text().match(/thread=req-\\d+/g) || []));",
+                  "  console.log([...threads]);",
+                  "  pm.test('5 requests, 5 threads', () => pm.expect(threads.size).to.eql(5));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/topics"
+          }
+        },
+        {
+          "name": "The cap: at most 100 requests at once, the next one gets 429",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const h = pm.response.json();",
+                  "pm.test('cap reported', () => pm.expect(h.max_concurrent).to.eql(100));",
+                  "pm.test('refused counter', () => pm.expect(h).to.have.property('refused'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/health"
+          }
+        },
+        {
+          "name": "gRPC side: a pool of threads rpc_<n>",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('gRPC calls on pool threads', () => pm.expect(pm.response.text()).to.match(/\\[broker-grpc\\].*thread=rpc_\\d+/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=thread=rpc_&lines=5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Grade 8: gRPC between services; gateway closed to everything that is not a player's",
+      "description": "Game ↔ Player and every event go over gRPC through broker:50051, forwarded undecoded. The gateway answers 404 to service-only routes even with a valid token.",
+      "item": [
+        {
+          "name": "Every instance registered a gRPC address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const g = pm.response.json();",
+                  "pm.test('player copies on :9081', () => Object.keys(g.player).forEach(a => pm.expect(a).to.match(/:9081$/)));",
+                  "pm.test('game copies on :9082', () => Object.keys(g.game).forEach(a => pm.expect(a).to.match(/:9082$/)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/grpc"
+          }
+        },
+        {
+          "name": "Game → broker → Player over gRPC (Get, SetPresence of the setup session)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('gRPC calls forwarded to a player copy', () => pm.expect(pm.response.text()).to.match(/\\/player\\.Player\\/(Get|SetPresence) OK .*-> player at \\S+:9081/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=[broker-grpc] /player.Player/&lines=10"
+          }
+        },
+        {
+          "name": "Events over gRPC: Broker.Publish and Consumer.Deliver",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.text();",
+                  "pm.test('Publish over gRPC', () => pm.expect(t).to.include('/events.Broker/Publish OK'));",
+                  "pm.test('Deliver over gRPC', () => pm.expect(t).to.include('(gRPC)'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=player.leveled_up&lines=10"
+          }
+        },
+        {
+          "name": "Closed: POST /players/{id}/xp, even with a token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{playerId}}/xp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delta\": 1000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Closed: the internal key opens nothing on the gateway",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('refused: 401 without a login, 404 with the login cookie', () => pm.expect(pm.response.code).to.be.oneOf([401, 404]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/{{playerId}}/xp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delta\": 1000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Closed: any /<prefix>/internal/... path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players/internal/anything"
+          }
+        },
+        {
+          "name": "Closed: a teammate's service-only route (GET /world/spawn-points)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/world/spawn-points"
+          }
+        },
+        {
+          "name": "Closed: /logs, /openapi.json, /docs, /ws/player",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "let left = 3, codes = {};",
+                  "['/openapi.json', '/docs', '/ws/player'].forEach(p => pm.sendRequest({url: pm.variables.replaceIn('{{gatewayUrl}}') + p, header: {Authorization: 'Bearer ' + pm.collectionVariables.get('token')}}, (err, res) => {",
+                  "  codes[p] = res.code;",
+                  "  if (--left === 0) pm.test('all 404: ' + JSON.stringify(codes), () => Object.values(codes).forEach(c => pm.expect(c).to.eql(404)));",
+                  "}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/logs"
+          }
+        },
+        {
+          "name": "Still open: a player's own routes and /ws/game",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('the game socket URL', () => pm.expect(pm.response.json().url).to.match(/^ws:\\/\\//));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/ws/game"
+          }
+        },
+        {
+          "name": "The broker refuses a call between services without the key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/players/{{playerId}}/xp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delta\": 1000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Grade 9: durable queues, dead letter channel, its endpoint",
+      "description": "Events are in SQLite (/data/broker.db, volume broker-data) before the ack, deleted after the subscriber acks. Durability demo outside Postman: docker compose stop game game-2 → level up → restart broker → start game.",
+      "item": [
+        {
+          "name": "The store survived restarts: opened from disk at start",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('SQLite store on the volume', () => pm.expect(pm.response.text()).to.match(/message\\(s\\) waiting from before, \\d+ dead letter/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/logs?service=broker&contains=store at /data/broker.db&lines=3"
+          }
+        },
+        {
+          "name": "Dead letters need the key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/dead-letters"
+          }
+        },
+        {
+          "name": "Publish an event Game cannot read",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('badEventId', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));",
+                  "pm.test('stored for game', () => pm.expect(pm.response.json().subscribers).to.eql(['game']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{brokerUrl}}/topics/player.leveled_up",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"{{badEventId}}\",\n  \"type\": \"player.leveled_up\",\n  \"version\": 1,\n  \"payload\": \"not an object\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Game rejected it: it is in the dead letter channel",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 2000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().deadLetters.find(x => x.eventId === pm.collectionVariables.get('badEventId'));",
+                  "pm.test('found', () => pm.expect(d).to.be.an('object'));",
+                  "pm.test('reason rejected', () => pm.expect(d.reason).to.eql('rejected'));",
+                  "pm.test('Game said INVALID_ARGUMENT', () => pm.expect(d.lastError).to.include('INVALID_ARGUMENT'));",
+                  "pm.test('the whole event is kept', () => pm.expect(d.event.payload).to.eql('not an object'));",
+                  "pm.collectionVariables.set('deadId', d.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters?topic=player.leveled_up&limit=20"
+          }
+        },
+        {
+          "name": "Put it back on its queue",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));",
+                  "pm.test('requeued', () => pm.expect(pm.response.json().requeued).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters/{{deadId}}/retry"
+          }
+        },
+        {
+          "name": "Retried, rejected again: a new dead letter for the same event",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 2000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const mine = pm.response.json().deadLetters.filter(x => x.eventId === pm.collectionVariables.get('badEventId'));",
+                  "pm.test('one dead letter, with a new id', () => { pm.expect(mine.length).to.eql(1); pm.expect(mine[0].id).to.not.eql(Number(pm.collectionVariables.get('deadId'))); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters?topic=player.leveled_up&limit=20"
+          }
+        },
+        {
+          "name": "GET /topics counts waiting and dead",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const lv = pm.response.json().topics.find(x => x.topic === 'player.leveled_up');",
+                  "pm.test('dead ≥ 1', () => pm.expect(lv.dead).to.be.at.least(1));",
+                  "pm.test('nothing stuck waiting', () => pm.expect(lv.waiting).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{brokerUrl}}/topics"
+          }
+        },
+        {
+          "name": "Unknown dead letter: 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{brokerUrl}}/dead-letters/999999999/retry"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Grade 10: high availability, load-based balancing, Prometheus + Grafana + Loki",
+      "description": "Load: the broker picks the copy with the fewest of its own calls in progress. HA demo outside Postman: docker pause / docker kill one player copy, then rerun grade 5's last request.",
+      "item": [
+        {
+          "name": "Load is measured per copy: broker_instance_in_flight",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('the broker tracks both player copies', () => pm.expect(pm.response.json().data.result.length).to.be.at.least(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/query?query=count by (target) (broker_instance_in_flight{service=\"player\"})"
+          }
+        },
+        {
+          "name": "10 calls at once are spread over both copies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const count = {}; let left = 10;",
+                  "for (let i = 0; i < 10; i++) pm.sendRequest({url: pm.variables.replaceIn('{{gatewayUrl}}/players?limit=1'), header: {Authorization: 'Bearer ' + pm.collectionVariables.get('token')}}, (err, res) => {",
+                  "  const c = res.headers.get('X-Upstream-Instance'); count[c] = (count[c] || 0) + 1;",
+                  "  if (--left === 0) { console.log(count); pm.test('both copies took calls: ' + JSON.stringify(count), () => pm.expect(Object.keys(count).length).to.be.at.least(2)); }",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/players?limit=1",
+            "description": "Asks for the player list, which the gateway does not cache (Lab 5), so every call reaches the Player Service."
+          }
+        },
+        {
+          "name": "Reroutes and breaker trips are counted",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('query ok (values appear after a kill/pause demo)', () => pm.expect(pm.response.json().status).to.eql('success'));",
+                  "console.log(JSON.stringify(pm.response.json().data.result.map(r => [r.metric.__name__, r.metric.service, r.value[1]])));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/query?query=sum by (__name__, service) ({__name__=~\"broker_reroutes_total|broker_breaker_trips_total|broker_breaker_failures_total\"})"
+          }
+        },
+        {
+          "name": "Prometheus finds its targets through our Service Discovery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('http_sd: player targets on :9100', () => pm.expect(pm.response.json().filter(t => t.labels.app === 'player').length).to.be.at.least(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Internal-Key",
+                "value": "{{internalKey}}"
+              }
+            ],
+            "url": "{{discoveryUrl}}/prometheus"
+          }
+        },
+        {
+          "name": "Prometheus scrapes our five services, all up",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.json().data.activeTargets;",
+                  "['gateway', 'broker', 'player', 'game', 'discovery'].forEach(a => pm.test(a + ' scraped', () => pm.expect(t.map(x => x.labels.app)).to.include(a)));",
+                  "pm.test('all up', () => t.forEach(x => pm.expect(x.health).to.eql('up')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/targets?state=active"
+          }
+        },
+        {
+          "name": "Dead letters in Prometheus",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 6000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('≥ 1 (grade 9)', () => pm.expect(Number(pm.response.json().data.result[0].value[1])).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{prometheusUrl}}/api/v1/query?query=sum(broker_dead_letters)"
+          }
+        },
+        {
+          "name": "Grafana: the dashboard, no login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().dashboard;",
+                  "pm.test('title', () => pm.expect(d.title).to.eql('In Kahoots with the Undead'));",
+                  "pm.test('31 panels', () => pm.expect(d.panels.length).to.eql(31));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/dashboards/uid/kahoots"
+          }
+        },
+        {
+          "name": "Loki has the logs of every container, the teammates' too",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('lokiStart', String((Date.now() - 6 * 3600 * 1000) * 1000000));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json().data;",
+                  "['gateway', 'broker', 'player', 'game', 'discovery', 'exam', 'world', 'zombie', 'resource'].forEach(x => pm.test(x, () => pm.expect(s).to.include(x)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/label/service/values?start={{lokiStart}}"
+          }
+        },
+        {
+          "name": "Loki parsed our format: level and tag labels",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('broker tags', () => pm.expect(pm.response.json().data).to.include.members(['broker-http', 'broker-topic', 'broker-grpc']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/label/tag/values?start={{lokiStart}}"
+          }
+        },
+        {
+          "name": "Loki query: the broker's warnings and errors",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const lines = pm.response.json().data.result.flatMap(s => s.values.map(v => v[1]));",
+                  "console.log(lines.slice(0, 5).join('\\n'));",
+                  "pm.test('there are some (dead letters of grade 9 at least)', () => pm.expect(lines.length).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{grafanaUrl}}/api/datasources/proxy/uid/loki/loki/api/v1/query_range?query={tag=~\"broker-.*\",level=~\"WARN|ERROR\"}&limit=20&start={{lokiStart}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cleanup",
+      "description": "",
+      "item": [
+        {
+          "name": "Delete the setup session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": "{{gatewayUrl}}/game/sessions/{{sessionId}}"
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "gatewayUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "brokerUrl",
+      "value": "http://localhost:8070"
+    },
+    {
+      "key": "discoveryUrl",
+      "value": "http://localhost:8090"
+    },
+    {
+      "key": "prometheusUrl",
+      "value": "http://localhost:9090"
+    },
+    {
+      "key": "grafanaUrl",
+      "value": "http://localhost:3001"
+    },
+    {
+      "key": "internalKey",
+      "value": "changeme"
+    },
+    {
+      "key": "password",
+      "value": "hunter2hunter2"
+    },
+    {
+      "key": "user",
+      "value": ""
+    },
+    {
+      "key": "playerId",
+      "value": ""
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "sessionId",
+      "value": ""
+    },
+    {
+      "key": "reqId",
+      "value": ""
+    },
+    {
+      "key": "burst",
+      "value": ""
+    },
+    {
+      "key": "badEventId",
+      "value": ""
+    },
+    {
+      "key": "deadId",
+      "value": ""
+    },
+    {
+      "key": "lokiStart",
+      "value": ""
+    }
+  ]
+}
