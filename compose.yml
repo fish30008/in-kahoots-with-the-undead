@@ -480,9 +480,9 @@ services:
       # deliveries, or after this many seconds.
       MAX_ATTEMPTS: ${BROKER_MAX_ATTEMPTS:-5}
       MESSAGE_TTL: ${BROKER_MESSAGE_TTL:-3600}
-      # Two phase commit: seconds the coordinator waits between its decision and
-      # phase 2. 0 always, except in the test that stops the broker exactly there.
-      TX_PAUSE: ${BROKER_TX_PAUSE:-0}
+      # Sagas: seconds the coordinator waits after each step. 0 always, except in the
+      # test that stops the broker in the middle of a saga.
+      SAGA_PAUSE: ${BROKER_SAGA_PAUSE:-0}
     volumes:
       - logs:/logs
       - broker-data:/data
