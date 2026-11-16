@@ -238,7 +238,7 @@
                 "value": "{{internalKey}}"
               }
             ],
-            "url": "{{brokerUrl}}/logs?lines=500"
+            "url": "{{brokerUrl}}/logs?lines=5000"
           }
         },
         {

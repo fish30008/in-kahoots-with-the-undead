@@ -21,6 +21,9 @@ and holds our services as git submodules.
 | Exam, World, Zombie, Resource | teammates | NestJS | 8083–8086 | Exams, campus map, zombie types, resources |
 | Base, Crafting | teammates | Go | 8087–8088 | Base upgrades, crafting |
 | Client | teammates | browser + nginx | 3000 | The game UI |
+| Cache | us | 3 × Redis | internal | GET answers and verified tokens of the gateway, sharded by consistent hashing |
+| `player-db`, `game-db` | us | PostgreSQL + repmgr, 3 nodes each | 5433 (`game-db-0`) | One primary and two replicas, automatic failover |
+| Data Warehouse + ETL | us | PostgreSQL + a shell job | 5440 | Analytics: what happened, copied out of Player's and Game's replicas |
 
 Three rules hold everywhere:
 
@@ -90,6 +93,74 @@ Stop a Player copy in the middle of a run: no client sees an error.
 
 Metrics ports are not published: players cannot read them.
 
+## Data: replication, cache, warehouse, sagas (Lab 5)
+
+**Replication and failover.** `player-db` and `game-db` are three Postgres nodes each
+(`bitnamilegacy/postgresql-repmgr`): one primary streaming its WAL to two read-only
+replicas. repmgr runs in every node; when the primary does not answer 3 times, 3 s
+apart, a replica is promoted and the other follows it (about 30 s). Player and Game are
+given all three hosts (`target_session_attrs=read-write`) and keep the one that takes
+writes, so there is no proxy. A stopped primary that is started again joins as a
+replica: every node starts through `db/replication/start.sh`, which makes it wait until
+its partners agree on the primary, so it cannot come back as a second one.
+
+**Cache.** The gateway keeps the answers of common GETs (`/players/items`,
+`/players/{id}`, `/players/{id}/inventory`, `/world/rooms`) and the tokens it verified
+in three independent Redis nodes. It picks the node for a key itself, on a consistent
+hash ring (100 points per node): adding a fourth node moves 23 % of the keys, where
+`hash % N` would move 75 %. A node that fails is skipped for 10 s and only its keys
+move to the next node. A change through the gateway drops the keys it made stale.
+
+| Header | Values | Meaning |
+|---|---|---|
+| `X-Cache` | `HIT`, `MISS` | on a cached route: answered from Redis, or by the service |
+| `X-Cache-Node` | `cache-1` … | the node the key lives on |
+| `X-Auth-Cache` | `HIT`, `MISS` | the token was known, or its signature was verified |
+
+`POST /auth/logout` (answered by the gateway) revokes the token in the cache until it
+would have expired: `200 {"status": "logged_out"}`, then `401` for that token.
+
+**Data Warehouse and ETL.** `warehouse-db` is a separate Postgres. The `etl` container
+runs `etl/etl.sh` every 10 s: it copies players, sessions, members and actions out of a
+replica of each database (`\copy … TO STDOUT | \copy … FROM STDIN`, read-only
+sessions, no password hashes or emails) into staging tables, and `etl/transform.sql`
+loads them into a small star schema. Rows deleted in a service stay in the warehouse.
+
+| Table | Columns |
+|---|---|
+| `dim_player` | `player_id`, `username`, `level`, `xp`, `registered_at`, `loaded_at` |
+| `fact_session` | `session_id`, `name`, `host_player_id`, `status`, `cycles`, `players`, `created_at`, `ended_at`, `created_day` |
+| `fact_action` | `action_id`, `session_id`, `player_id`, `type`, `room_id`, `status`, `started_at`, `completed_at`, `planned_seconds`, `actual_seconds`, `xp_awarded`, `reward_synced`, `started_day` |
+| `etl_runs` | `id`, `started_at`, `finished_at`, `status` (`ok`, `failed`), `players`, `sessions`, `actions`, `error` |
+
+Grafana reads it for the *Analytics* row of the dashboard;
+`docker compose exec warehouse-db psql -U warehouse -d warehouse` opens it.
+
+**Sagas.** Joining a session changes two databases: the player's online flag (Player)
+and the member row (Game). The broker coordinates it as a saga: it does not forward
+`POST /game/sessions/{id}/players`, it runs step 1 on Player and step 2 on Game, writes
+every step to its SQLite before and after, and when a step fails undoes the earlier
+ones in reverse. A saga interrupted by a broker restart is compensated at the next
+start. `GET localhost:8070/sagas` (with `X-Internal-Key`) lists them:
+
+```json
+{ "id": "a936cceb-…", "kind": "join-session", "state": "compensated",
+  "detail": "step 2 (player takes a seat) failed on game: 409",
+  "payload": { "session_id": "…", "player_id": 7 },
+  "steps": [
+    { "n": 1, "name": "player goes online", "service": "player", "state": "compensated", "status": 204, "kept": { "was_online": true } },
+    { "n": 2, "name": "player takes a seat", "service": "game", "state": "failed", "status": 409, "kept": {} } ] }
+```
+
+Saga states: `running`, `completed`, `compensating`, `compensated`. Step states:
+`pending`, `running`, `done`, `failed`, `unknown` (no answer), `compensating`,
+`compensated`. Before the saga this was a two phase commit (Postgres
+`PREPARE TRANSACTION`, the broker as coordinator); it is in the git history of the
+broker, Player and Game as `grade 8: two phase commit for joining a session`.
+
+Details: [services/gateway_service/README.md](services/gateway_service/README.md)
+(cache) and [services/broker_service/README.md](services/broker_service/README.md) (sagas).
+
 ## Running it
 
 ```bash
@@ -102,9 +173,12 @@ docker compose up -d --build
 - Grafana `http://localhost:3001`, Prometheus `http://localhost:9090`
 - `DEMO_SPEEDUP=60` in `.env` makes timed actions and day/night take seconds.
 
-Our five images are built from the submodules (`services/*`) until tag `4` is
-published on Docker Hub (`fish3008/<repo>:4`). `docker compose down -v` also drops
-the databases, the log volume and the broker's stored events.
+Our five images are published on Docker Hub as `fish3008/<repo>:5`
+(`gateway_service`, `broker_service`, `service_discovery`, `player_service`,
+`game_service`); `docker compose pull && docker compose up -d` runs them without
+building. `--build` builds them from the submodules (`services/*`) instead.
+`docker compose down -v --remove-orphans` also drops the databases, the cache, the
+warehouse, the log volume and the broker's stored events and sagas.
 
 ## Logs
 
@@ -147,12 +221,23 @@ Run against the whole stack, in Postman or with `npx newman run postman/<file>`:
 - `lab4-broker.postman_collection.json`: the broker's queues and topics (an event end to
   end), `GET /logs` following one request through gateway, broker and service, gRPC and
   the closed gateway, dead letters, and Prometheus / Grafana / Loki
+- `lab4-defence.postman_collection.json`: Lab 4, one folder per grade
+- `lab5-defence.postman_collection.json`: Lab 5, one folder per grade: the warehouse
+  and ETL, replication, the cache (HIT / MISS, invalidation, tokens, logout), sharding,
+  and the join saga (completed, compensated, the saga log). Generated from
+  `postman/build_lab5_defence.py`.
+
+What needs docker (stopping a database primary, a cache node or the broker in the
+middle of a saga) is in `lab5-tests.ps1`: `. .\lab5-tests.ps1`, then
+`Show-Replication`, `Test-Failover player`, `Test-CacheNodeDown`, `Show-HashRing`,
+`Test-SagaInterrupted`.
 
 ## Documentation
 
 - [flow.md](flow.md): how Gateway, Player and Game interact, step by step.
 - [communication.md](communication.md): every service's endpoints, events and schemas.
 - [lab4_plan.md](lab4_plan.md): the Lab 4 plan (message broker), step by step.
+- [lab5_plan.md](lab5_plan.md): the Lab 5 plan (replication, cache, sagas), step by step.
 - [architecture.mmd](architecture.mmd): source of `architecture.png`; render with
   `npx -p @mermaid-js/mermaid-cli mmdc -i architecture.mmd -o architecture.png -s 2 -b white`.
 - Each service's own README, in `services/<name>/`.

@@ -6,9 +6,9 @@ flowchart TB
 
     client(["<b>Game client</b> · browser · nginx on :3000, /api proxied to the gateway"])
 
-    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/>X-Request-Id on every request<br/><b>cache</b> (Lab 5): GET responses and verified tokens · the node for a key is picked on a <b>consistent hash ring</b>"]
+    gateway["<b>API Gateway</b> · Python / FastAPI · :8080 · the door for clients<br/>JWT check, X-Player-Id, task limits · knows the service from the path and puts the request on <b>its queue in the broker</b><br/><b>players only</b>: routes for services (/…/internal/…, POST /players/{id}/xp, …) → 404 · GET /ws/game → a Game copy, chosen by the broker<br/>X-Request-Id on every request<br/><b>cache</b> (Lab 5): GET responses and verified tokens · the node for a key is picked on a <b>consistent hash ring</b> (100 points per node) · X-Cache: HIT / MISS · POST /auth/logout revokes a token"]
 
-    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>load-based</b>: fewest calls in progress · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered<br/><b>rerouting</b>: a failed call goes to another copy · <b>durable queues</b> in SQLite (broker-data) · <b>dead letter channel</b>: GET /dead-letters<br/><b>saga coordinator</b> (Lab 5): joining a session = a Player step + a Game step, compensated in reverse when one fails · state in SQLite"]
+    broker["<b>Message Broker</b> (Lab 4) · Python, standard library only · :8070 · the door between services<br/><b>one thread per request</b> (ThreadingHTTPServer, HTTP/1.0) · 429 above MAX_CONCURRENT_TASKS · GET /topics<br/><b>gRPC :50051</b>: player.Player/* forwarded undecoded to a Player copy · events.Broker/Publish<br/><b>subscriber queue per service</b>: /queues/&lt;service&gt;/… from the gateway, /&lt;prefix&gt;/… between services · workers hand each message to one copy<br/><b>topics</b>: Publish → events.Consumer/Deliver on one copy of every subscribing service · subscriptions read from Discovery<br/><b>load-based</b>: fewest calls in progress · <b>circuit breaker</b>: 3 failures within TASK_TIMEOUT × 3.5 → removed and deregistered<br/><b>rerouting</b>: a failed call goes to another copy · <b>durable queues</b> in SQLite (broker-data) · <b>dead letter channel</b>: GET /dead-letters<br/><b>saga coordinator</b> (Lab 5): POST /game/sessions/{id}/players is not forwarded: step 1 Player (online), step 2 Game (seat), undone in reverse when one fails · every step in SQLite, an interrupted saga is compensated at start · GET /sagas"]
 
     subgraph playercopies["Player (ours, Go) · 2 copies · replicas, no host port · share player-db (Lab 5: primary + 2 replicas)"]
         direction LR
@@ -40,27 +40,27 @@ flowchart TB
 
 
     %% data stores (Lab 5: drawn at last, with replicas, warehouse and cache)
-    subgraph cache["Cache (Lab 5) · Redis · sharded by consistent hashing, in the Gateway"]
+    subgraph cache["Cache (Lab 5) · 3 independent Redis nodes, memory only · sharded by consistent hashing, in the Gateway · a node down: only its keys move"]
         direction LR
         cache1[("<b>cache-1</b>")]
         cache2[("<b>cache-2</b>")]
         cache3[("<b>cache-3</b>")]
     end
 
-    brokerdata[("<b>broker-data</b> · SQLite volume<br/>durable topic queues, subscriptions,<br/>dead letters, saga log")]
+    brokerdata[("<b>broker-data</b> · SQLite volume<br/>durable topic queues, subscriptions,<br/>dead letters, sagas and their steps")]
 
-    subgraph playerdb["player-db · PostgreSQL · streaming replication, automatic failover (repmgr)"]
+    subgraph playerdb["player-db (Lab 5) · PostgreSQL 17 · streaming replication, automatic failover by repmgr (~30 s) · db/replication/start.sh: a restarted node waits until its partners agree on the primary"]
         direction LR
-        playerdb0[("<b>player-db-0</b> · primary<br/>players, items, inventory,<br/>trades, outbox_events")]
+        playerdb0[("<b>player-db-0</b> · primary at first start<br/>players, items, inventory,<br/>trades, outbox_events")]
         playerdb1[("<b>player-db-1</b><br/>replica")]
         playerdb2[("<b>player-db-2</b><br/>replica")]
         playerdb0 == "WAL" ==> playerdb1
         playerdb0 == "WAL" ==> playerdb2
     end
 
-    subgraph gamedb["game-db · PostgreSQL · streaming replication, automatic failover (repmgr)"]
+    subgraph gamedb["game-db (Lab 5) · PostgreSQL 17 · streaming replication, automatic failover by repmgr · same start guard"]
         direction LR
-        gamedb0[("<b>game-db-0</b> · primary<br/>sessions, members, actions, zombies,<br/>outbox_events, received_events")]
+        gamedb0[("<b>game-db-0</b> · primary at first start<br/>sessions, members, actions, zombies,<br/>outbox_events, received_events")]
         gamedb1[("<b>game-db-1</b><br/>replica")]
         gamedb2[("<b>game-db-2</b><br/>replica")]
         gamedb0 == "WAL" ==> gamedb1
@@ -69,15 +69,15 @@ flowchart TB
 
     teamdb[("<b>6 PostgreSQL databases</b>, one per teammate service<br/>exam-db · world-db · zombie-db · resource-db · base-db · crafting-db")]
 
-    etl["<b>ETL job</b> (Lab 5) · etl/etl.sh in a stock Postgres image · every 10 s<br/><b>extract</b>: COPY out of the Player and Game databases (read-only)<br/><b>transform + load</b>: staging → dim_player, fact_session, fact_action"]
+    etl["<b>ETL job</b> (Lab 5) · etl/etl.sh in a stock Postgres image · every 10 s<br/><b>extract</b>: COPY out of a replica of the Player and of the Game database (read-only sessions)<br/><b>transform + load</b>: staging → dim_player, fact_session, fact_action"]
 
     warehouse[("<b>Data Warehouse</b> (Lab 5) · warehouse-db · PostgreSQL<br/>stg_* · dim_player · fact_session · fact_action · etl_runs")]
 
     %% who stores where
     gateway -- "GET responses · verified tokens" --> cache
-    broker --> brokerdata
-    playercopies -- "SQL · finds the primary by itself (multi-host URL)" --> playerdb
-    gamecopies -- "SQL · NOTIFY / LISTEN · advisory lock" --> gamedb
+    broker -- "events, dead letters, saga steps" --> brokerdata
+    playercopies -- "SQL · three hosts in the URL, keeps the one that takes writes" --> playerdb
+    gamecopies -- "SQL · same · NOTIFY / LISTEN and the clock lock re-opened after a failover" --> gamedb
     team --> teamdb
     playerdb -. "read from a replica" .-> etl
     gamedb -. "read from a replica" .-> etl

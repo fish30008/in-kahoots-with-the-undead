@@ -77,8 +77,8 @@ services:
       - ./db/replication/start.sh:/replication/start.sh:ro
 
   player:
-    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-4}
-    # Built from the submodule until tag 4 is published on Docker Hub.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/player_service:${PLAYER_SERVICE_TAG:-5}
+    # Published on Docker Hub; `docker compose up --build` builds it from the submodule instead.
     build: ./services/player_service
     restart: unless-stopped
     environment:
@@ -158,8 +158,8 @@ services:
   # with replicas because the browser connects to each directly, so each needs
   # its own port on the host; game-2 copies everything else from game.
   game: &game
-    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-4}
-    # Built from the submodule until tag 4 is published on Docker Hub.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/game_service:${GAME_SERVICE_TAG:-5}
+    # Published on Docker Hub; `docker compose up --build` builds it from the submodule instead.
     build: ./services/game_service
     restart: unless-stopped
     environment: &game-env
@@ -419,8 +419,8 @@ services:
 
   discovery:
     # Keeps the list of running service instances; they register on startup.
-    image: ${DOCKERHUB_USERNAME:-fish3008}/service_discovery:${DISCOVERY_SERVICE_TAG:-4}
-    # Built from the submodule until tag 4 is published on Docker Hub.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/service_discovery:${DISCOVERY_SERVICE_TAG:-5}
+    # Published on Docker Hub; `docker compose up --build` builds it from the submodule instead.
     build: ./services/service_discovery
     restart: unless-stopped
     environment:
@@ -447,8 +447,8 @@ services:
     # The Message Broker (Lab 4): every request from the gateway goes through its
     # queue for the service, every service-to-service call through it too, and
     # events are published to its topics. Load balancing and circuit breakers live here.
-    image: ${DOCKERHUB_USERNAME:-fish3008}/broker_service:${BROKER_SERVICE_TAG:-4}
-    # Built from the submodule until tag 4 is published on Docker Hub.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/broker_service:${BROKER_SERVICE_TAG:-5}
+    # Published on Docker Hub; `docker compose up --build` builds it from the submodule instead.
     build: ./services/broker_service
     restart: unless-stopped
     environment:
@@ -499,8 +499,8 @@ services:
 
   gateway:
     # The single point of entry: http://localhost:8080.
-    image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-4}
-    # Built from the submodule until tag 4 is published on Docker Hub.
+    image: ${DOCKERHUB_USERNAME:-fish3008}/gateway_service:${GATEWAY_SERVICE_TAG:-5}
+    # Published on Docker Hub; `docker compose up --build` builds it from the submodule instead.
     build: ./services/gateway_service
     restart: unless-stopped
     environment:
